@@ -546,15 +546,11 @@
         ],
       });
       const added: string[] = [];
-      if (Array.isArray(selected)) {
+      if (selected) {
         for (const item of selected) {
           if (item.trim().length > 0 && !localSourceFiles.includes(item)) {
             added.push(item);
           }
-        }
-      } else if (typeof selected === "string" && selected.trim().length > 0) {
-        if (!localSourceFiles.includes(selected)) {
-          added.push(selected);
         }
       }
 
