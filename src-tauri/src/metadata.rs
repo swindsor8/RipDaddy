@@ -146,7 +146,7 @@ pub fn normalize_imdb_id(raw: &str) -> Option<String> {
         return None;
     }
     let lower = trimmed.to_ascii_lowercase();
-    if let Some(pos) = lower.find("tt") {
+    for (pos, _) in lower.match_indices("tt") {
         let digits: String = lower[pos + 2..]
             .chars()
             .take_while(|c| c.is_ascii_digit())
