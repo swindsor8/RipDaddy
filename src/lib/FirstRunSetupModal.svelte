@@ -99,28 +99,32 @@
       role="dialog"
       aria-modal="true"
       aria-label="RipDaddy First-Run Setup"
-      class="flex w-full max-w-[640px] flex-col overflow-hidden rounded-2xl border border-[#DFDDD6] bg-white shadow-[0_28px_70px_rgba(17,17,17,0.18)]"
+      class="flex w-full max-w-[640px] flex-col overflow-hidden rounded-2xl border border-[#DAD3C7] bg-white shadow-[0_28px_70px_rgba(26,21,19,0.18)]"
     >
+      <div
+        class="h-[3px] w-full shrink-0 bg-gradient-to-r from-[#4CDE99] via-[#F8B142] to-[#FA637C]"
+        aria-hidden="true"
+      ></div>
       <!-- Header -->
       <header
-        class="flex items-start justify-between gap-4 border-b border-[#E5E3DD] bg-[#F8F7F4] px-6 py-5"
+        class="flex items-start justify-between gap-4 border-b border-[#E6E0D6] bg-[#FAF8F4] px-6 py-5"
       >
         <div class="flex items-start gap-3">
           <RipDaddyLogo class="mt-0.5 h-11 w-11" alt="" />
           <div>
             <div class="flex items-center gap-2">
               <h1
-                class="text-base font-extrabold tracking-[-0.025em] text-[#111111]"
+                class="text-base font-extrabold tracking-[-0.025em] text-[#1A1513]"
               >
                 Welcome to RipDaddy
               </h1>
               <span
-                class="rounded-full border border-[#DFDDD6] bg-white px-2 py-0.5 font-mono text-[10px] font-semibold uppercase text-[#5C5B57]"
+                class="rounded-full border border-[#DAD3C7] bg-white px-2 py-0.5 font-mono text-[10px] font-semibold uppercase text-[#61554F]"
               >
                 {binaries.platform}
               </span>
             </div>
-            <p class="mt-1 text-xs leading-relaxed text-[#5C5B57]">
+            <p class="mt-1 text-xs leading-relaxed text-[#61554F]">
               RipDaddy wraps your local MakeMKV and HandBrake CLIs without
               bundling third-party binaries. Let's make sure the tools you need
               are ready.
@@ -142,25 +146,25 @@
         <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
           <!-- MakeMKV Card -->
           <div
-            class="flex flex-col justify-between space-y-3 rounded-xl border border-[#E5E3DD] bg-[#FAF9F6] p-4"
+            class="flex flex-col justify-between space-y-3 rounded-xl border border-[#E6E0D6] bg-[#F7F4EE] p-4"
           >
             <div class="space-y-2">
               <div class="flex items-center justify-between gap-2">
                 <div class="flex items-center gap-2">
                   <span
                     class={`h-2.5 w-2.5 rounded-full ${
-                      binaries.makemkv.found ? "bg-[#3AD27E]" : "bg-[#F6BE4F]"
+                      binaries.makemkv.found ? "bg-[#4CDE99]" : "bg-[#F8B142]"
                     }`}
                   ></span>
-                  <span class="font-mono text-xs font-bold text-[#111111]">
+                  <span class="font-mono text-xs font-bold text-[#1A1513]">
                     makemkvcon
                   </span>
                 </div>
                 <span
                   class={`rounded-full border px-2 py-0.5 font-mono text-[10px] font-semibold ${
                     binaries.makemkv.found
-                      ? "border-[#24B465] bg-[#3AD27E] text-[#111111]"
-                      : "border-[#E5E3DD] bg-white text-[#5C5B57]"
+                      ? "border-[#1FA868] bg-[#4CDE99] text-[#1A1513]"
+                      : "border-[#E6E0D6] bg-white text-[#61554F]"
                   }`}
                 >
                   {binaries.makemkv.found
@@ -169,13 +173,13 @@
                 </span>
               </div>
 
-              <p class="text-[11px] text-[#6B6A65]">
+              <p class="text-[11px] text-[#70645D]">
                 Used for Stage 1 optical disc ripping (<span class="font-mono">Rip Only</span> &amp; <span class="font-mono">Rip + Encode</span>).
               </p>
 
               {#if binaries.makemkv.found && binaries.makemkv.path}
                 <p
-                  class="truncate rounded border border-[#E5E3DD] bg-white px-2 py-1 font-mono text-[10px] text-[#52524E]"
+                  class="truncate rounded border border-[#E6E0D6] bg-white px-2 py-1 font-mono text-[10px] text-[#544943]"
                   title={binaries.makemkv.path}
                 >
                   {binaries.makemkv.path}
@@ -189,7 +193,7 @@
               {:else}
                 <div class="flex items-center gap-1">
                   <code
-                    class="flex-1 truncate rounded border border-[#E5E3DD] bg-white px-2 py-1 font-mono text-[10px] text-[#111111]"
+                    class="flex-1 truncate rounded border border-[#E6E0D6] bg-white px-2 py-1 font-mono text-[10px] text-[#1A1513]"
                     title={binaries.makemkv.installHint.command}
                   >
                     {binaries.makemkv.installHint.command}
@@ -201,7 +205,7 @@
                         void copyCommand(binaries.makemkv.installHint.command);
                       }
                     }}
-                    class="rounded border border-[#DFDDD6] bg-white px-2 py-1 text-[10px] font-semibold text-[#111111] hover:bg-[#F2F0EA]"
+                    class="rounded border border-[#DAD3C7] bg-white px-2 py-1 text-[10px] font-semibold text-[#1A1513] hover:bg-[#F2EDE5]"
                   >
                     {copiedCommand === binaries.makemkv.installHint.command
                       ? "Copied"
@@ -218,7 +222,7 @@
                     type="button"
                     onclick={() => onInstallSingle("makeMkv")}
                     disabled={installingBinary !== null}
-                    class="flex-1 rounded-md bg-[#1D8BF8] px-2.5 py-1.5 text-[11px] font-semibold text-white hover:bg-[#137CE5] disabled:opacity-50"
+                    class="flex-1 rounded-md bg-[#11824F] px-2.5 py-1.5 text-[11px] font-semibold text-white hover:bg-[#0D6E42] disabled:opacity-50"
                   >
                     {installingBinary === "makeMkv"
                       ? "Installing..."
@@ -228,7 +232,7 @@
                 <button
                   type="button"
                   onclick={() => onBrowseBinary("makemkv")}
-                  class="flex-1 rounded-md border border-[#DFDDD6] bg-white px-2.5 py-1.5 text-[11px] font-semibold text-[#111111] hover:bg-[#F2F0EA]"
+                  class="flex-1 rounded-md border border-[#DAD3C7] bg-white px-2.5 py-1.5 text-[11px] font-semibold text-[#1A1513] hover:bg-[#F2EDE5]"
                 >
                   Locate...
                 </button>
@@ -238,25 +242,25 @@
 
           <!-- HandBrakeCLI Card -->
           <div
-            class="flex flex-col justify-between space-y-3 rounded-xl border border-[#E5E3DD] bg-[#FAF9F6] p-4"
+            class="flex flex-col justify-between space-y-3 rounded-xl border border-[#E6E0D6] bg-[#F7F4EE] p-4"
           >
             <div class="space-y-2">
               <div class="flex items-center justify-between gap-2">
                 <div class="flex items-center gap-2">
                   <span
                     class={`h-2.5 w-2.5 rounded-full ${
-                      binaries.handbrake.found ? "bg-[#3AD27E]" : "bg-[#F6BE4F]"
+                      binaries.handbrake.found ? "bg-[#4CDE99]" : "bg-[#F8B142]"
                     }`}
                   ></span>
-                  <span class="font-mono text-xs font-bold text-[#111111]">
+                  <span class="font-mono text-xs font-bold text-[#1A1513]">
                     HandBrakeCLI
                   </span>
                 </div>
                 <span
                   class={`rounded-full border px-2 py-0.5 font-mono text-[10px] font-semibold ${
                     binaries.handbrake.found
-                      ? "border-[#24B465] bg-[#3AD27E] text-[#111111]"
-                      : "border-[#E5E3DD] bg-white text-[#5C5B57]"
+                      ? "border-[#1FA868] bg-[#4CDE99] text-[#1A1513]"
+                      : "border-[#E6E0D6] bg-white text-[#61554F]"
                   }`}
                 >
                   {binaries.handbrake.found
@@ -265,13 +269,13 @@
                 </span>
               </div>
 
-              <p class="text-[11px] text-[#6B6A65]">
+              <p class="text-[11px] text-[#70645D]">
                 Used for Stage 2 encoding (<span class="font-mono">Encode Only</span> &amp; <span class="font-mono">Rip + Encode</span>).
               </p>
 
               {#if binaries.handbrake.found && binaries.handbrake.path}
                 <p
-                  class="truncate rounded border border-[#E5E3DD] bg-white px-2 py-1 font-mono text-[10px] text-[#52524E]"
+                  class="truncate rounded border border-[#E6E0D6] bg-white px-2 py-1 font-mono text-[10px] text-[#544943]"
                   title={binaries.handbrake.path}
                 >
                   {binaries.handbrake.path}
@@ -285,7 +289,7 @@
               {:else}
                 <div class="flex items-center gap-1">
                   <code
-                    class="flex-1 truncate rounded border border-[#E5E3DD] bg-white px-2 py-1 font-mono text-[10px] text-[#111111]"
+                    class="flex-1 truncate rounded border border-[#E6E0D6] bg-white px-2 py-1 font-mono text-[10px] text-[#1A1513]"
                     title={binaries.handbrake.installHint.command}
                   >
                     {binaries.handbrake.installHint.command}
@@ -297,7 +301,7 @@
                         void copyCommand(binaries.handbrake.installHint.command);
                       }
                     }}
-                    class="rounded border border-[#DFDDD6] bg-white px-2 py-1 text-[10px] font-semibold text-[#111111] hover:bg-[#F2F0EA]"
+                    class="rounded border border-[#DAD3C7] bg-white px-2 py-1 text-[10px] font-semibold text-[#1A1513] hover:bg-[#F2EDE5]"
                   >
                     {copiedCommand === binaries.handbrake.installHint.command
                       ? "Copied"
@@ -314,7 +318,7 @@
                     type="button"
                     onclick={() => onInstallSingle("handBrake")}
                     disabled={installingBinary !== null}
-                    class="flex-1 rounded-md bg-[#1D8BF8] px-2.5 py-1.5 text-[11px] font-semibold text-white hover:bg-[#137CE5] disabled:opacity-50"
+                    class="flex-1 rounded-md bg-[#11824F] px-2.5 py-1.5 text-[11px] font-semibold text-white hover:bg-[#0D6E42] disabled:opacity-50"
                   >
                     {installingBinary === "handBrake"
                       ? "Installing..."
@@ -324,7 +328,7 @@
                 <button
                   type="button"
                   onclick={() => onBrowseBinary("handbrake")}
-                  class="flex-1 rounded-md border border-[#DFDDD6] bg-white px-2.5 py-1.5 text-[11px] font-semibold text-[#111111] hover:bg-[#F2F0EA]"
+                  class="flex-1 rounded-md border border-[#DAD3C7] bg-white px-2.5 py-1.5 text-[11px] font-semibold text-[#1A1513] hover:bg-[#F2EDE5]"
                 >
                   Locate...
                 </button>
@@ -335,7 +339,7 @@
 
         {#if setupOutcomes.length > 0}
           <div
-            class="space-y-1 rounded-lg border border-[#E5E3DD] bg-[#F8F7F4] p-3 text-[11px]"
+            class="space-y-1 rounded-lg border border-[#E6E0D6] bg-[#FAF8F4] p-3 text-[11px]"
           >
             {#each setupOutcomes as outcome (outcome.binary)}
               <p
@@ -350,15 +354,15 @@
         {/if}
 
         <div
-          class="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[#E5E3DD] bg-[#F8F7F4] px-3.5 py-2.5 text-[11px] text-[#5C5B57]"
+          class="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[#E6E0D6] bg-[#FAF8F4] px-3.5 py-2.5 text-[11px] text-[#61554F]"
         >
           <span>
             Output folder auto-configured to
-            <span class="font-mono font-semibold text-[#111111]">
+            <span class="font-mono font-semibold text-[#1A1513]">
               {binaries.defaultPaths.outputDir}
             </span>
           </span>
-          <span class="font-mono text-[10px] text-[#787772]">
+          <span class="font-mono text-[10px] text-[#7D716A]">
             Change anytime in Settings
           </span>
         </div>
@@ -366,14 +370,14 @@
 
       <!-- Footer Actions -->
       <footer
-        class="flex flex-wrap items-center justify-between gap-3 border-t border-[#E5E3DD] bg-[#F8F7F4] px-6 py-4"
+        class="flex flex-wrap items-center justify-between gap-3 border-t border-[#E6E0D6] bg-[#FAF8F4] px-6 py-4"
       >
         <div class="flex items-center gap-2">
           <button
             type="button"
             onclick={onRecheck}
             disabled={checkingBinaries || installingBinary !== null}
-            class="rounded-md border border-[#DFDDD6] bg-white px-3 py-1.5 text-xs font-semibold text-[#111111] hover:bg-[#EFECE6] disabled:opacity-50"
+            class="rounded-md border border-[#DAD3C7] bg-white px-3 py-1.5 text-xs font-semibold text-[#1A1513] hover:bg-[#EDE7DD] disabled:opacity-50"
           >
             {checkingBinaries ? "Checking..." : "Re-check"}
           </button>
@@ -383,7 +387,7 @@
               type="button"
               onclick={onFinish}
               disabled={installingBinary !== null}
-              class="px-2 py-1.5 text-xs font-medium text-[#6B6A65] hover:text-[#111111] disabled:opacity-50"
+              class="px-2 py-1.5 text-xs font-medium text-[#70645D] hover:text-[#1A1513] disabled:opacity-50"
             >
               Skip for now
             </button>
@@ -394,7 +398,7 @@
           <button
             type="button"
             onclick={onFinish}
-            class="rounded-md border border-[#24B465] bg-[#3AD27E] px-4 py-2 text-xs font-bold text-[#111111] shadow-[0_1px_2px_rgba(0,0,0,0.06)] transition hover:brightness-95"
+            class="rounded-md border border-[#1FA868] bg-[#4CDE99] px-4 py-2 text-xs font-bold text-[#1A1513] shadow-[0_1px_2px_rgba(0,0,0,0.06)] transition hover:brightness-95"
           >
             All Set — Open RipDaddy →
           </button>
@@ -403,7 +407,7 @@
             type="button"
             onclick={onAutoSetupAll}
             disabled={installingBinary !== null}
-            class="rounded-md bg-[#111111] px-4 py-2 text-xs font-semibold text-white transition hover:bg-[#2A2A2A] disabled:opacity-50"
+            class="rounded-md bg-[#11824F] px-4 py-2 text-xs font-semibold text-white shadow-[0_1px_2px_rgba(17,130,79,0.22)] transition hover:bg-[#0D6E42] disabled:opacity-50"
           >
             {installingBinary === "all"
               ? `Installing via ${autoInstallLabel}...`
@@ -413,7 +417,7 @@
           <button
             type="button"
             onclick={onFinish}
-            class="rounded-md bg-[#111111] px-4 py-2 text-xs font-semibold text-white transition hover:bg-[#2A2A2A]"
+            class="rounded-md bg-[#11824F] px-4 py-2 text-xs font-semibold text-white shadow-[0_1px_2px_rgba(17,130,79,0.22)] transition hover:bg-[#0D6E42]"
           >
             Continue to RipDaddy →
           </button>

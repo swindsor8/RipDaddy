@@ -95,31 +95,31 @@
       id: "general",
       label: "General",
       desc: "Workflow & behavior",
-      dot: "bg-[#111111]",
+      dot: "bg-[#1A1513]",
     },
     {
       id: "binaries",
       label: "External CLIs",
       desc: "MakeMKV & HandBrake",
-      dot: "bg-[#3AD27E]",
+      dot: "bg-[#4CDE99]",
     },
     {
       id: "storage",
       label: "Storage & Paths",
       desc: "Output & temp dirs",
-      dot: "bg-[#F6BE4F]",
+      dot: "bg-[#F8B142]",
     },
     {
       id: "encoding",
       label: "Encoding & Ripping",
       desc: "Presets & filters",
-      dot: "bg-[#FF6AD5]",
+      dot: "bg-[#FA637C]",
     },
     {
       id: "metadata",
       label: "Metadata & Naming",
       desc: "IMDb / TVDB / TMDB",
-      dot: "bg-[#58B0F9]",
+      dot: "bg-[#5BC0EB]",
     },
   ];
 
@@ -232,8 +232,8 @@
   }
 
   function statusDotClass(status: BinaryStatus | undefined): string {
-    if (!status) return "bg-[#B8B6AF]";
-    return status.found ? "bg-[#22B567]" : "bg-[#E59819]";
+    if (!status) return "bg-[#B6AEA2]";
+    return status.found ? "bg-[#1FA868]" : "bg-[#DE941E]";
   }
 
   function handleDefaultModeChange(event: Event): void {
@@ -290,26 +290,31 @@
     class="fixed inset-0 z-40 cursor-default bg-black/15 backdrop-blur-[1px]"
   ></button>
 
-  <!-- Categorized Settings Dropdown (Clay Editorial Style) -->
+  <!-- Categorized Settings Dropdown (RipDaddy Mascot Theme) -->
   <div
     role="dialog"
     aria-label="RipDaddy Settings"
-    class="fixed top-16 left-1/2 z-50 flex h-[548px] max-h-[calc(100vh-5rem)] w-[700px] max-w-[calc(100vw-2rem)] -translate-x-1/2 overflow-hidden rounded-xl border border-[#DFDDD6] bg-white shadow-[0_24px_60px_rgba(17,17,17,0.14)]"
+    class="fixed top-16 left-1/2 z-50 flex h-[548px] max-h-[calc(100vh-5rem)] w-[700px] max-w-[calc(100vw-2rem)] -translate-x-1/2 flex-col overflow-hidden rounded-xl border border-[#DAD3C7] bg-white shadow-[0_24px_60px_rgba(26,21,19,0.14)]"
   >
+    <div
+      class="h-[3px] w-full shrink-0 bg-gradient-to-r from-[#4CDE99] via-[#F8B142] to-[#FA637C]"
+      aria-hidden="true"
+    ></div>
+    <div class="flex min-h-0 flex-1">
     <!-- Category Sidebar -->
     <nav
       aria-label="Settings categories"
-      class="flex w-52 shrink-0 flex-col border-r border-[#E5E3DD] bg-[#F8F7F4] p-3"
+      class="flex w-52 shrink-0 flex-col border-r border-[#E6E0D6] bg-[#FAF8F4] p-3"
     >
       <div class="mb-2.5 flex items-center justify-between px-2 py-1">
         <span
-          class="text-[10px] font-bold uppercase tracking-[0.1em] text-[#787772]"
+          class="text-[10px] font-bold uppercase tracking-[0.1em] text-[#7D716A]"
         >
           Settings
         </span>
         {#if binaries?.platform}
           <span
-            class="rounded-full border border-[#E5E3DD] bg-white px-2 py-0.5 font-mono text-[10px] font-medium uppercase text-[#5C5B57]"
+            class="rounded-full border border-[#E6E0D6] bg-white px-2 py-0.5 font-mono text-[10px] font-medium uppercase text-[#61554F]"
           >
             {binaries.platform}
           </span>
@@ -323,20 +328,20 @@
             onclick={() => onSelectCategory(cat.id)}
             class={`flex w-full items-center justify-between rounded-lg px-2.5 py-2 text-left transition ${
               activeCategory === cat.id
-                ? "border border-[#E5E3DD] bg-white text-[#111111] shadow-[0_1px_2px_rgba(0,0,0,0.04)]"
-                : "border border-transparent text-[#52524E] hover:bg-white/70 hover:text-[#111111]"
+                ? "border border-[#E6E0D6] bg-white text-[#1A1513] shadow-[0_1px_2px_rgba(0,0,0,0.04)]"
+                : "border border-transparent text-[#544943] hover:bg-white/70 hover:text-[#1A1513]"
             }`}
           >
             <div class="flex min-w-0 items-center gap-2.5">
               <span class={`h-2 w-2 shrink-0 rounded-full ${cat.dot}`}></span>
               <div class="min-w-0">
                 <div class="truncate text-xs font-semibold">{cat.label}</div>
-                <div class="truncate text-[10px] text-[#787772]">{cat.desc}</div>
+                <div class="truncate text-[10px] text-[#7D716A]">{cat.desc}</div>
               </div>
             </div>
             {#if cat.id === "binaries" && missingCliCount > 0}
               <span
-                class="ml-1.5 shrink-0 rounded-full border border-[#DDA12D] bg-[#F6BE4F] px-1.5 py-0.5 font-mono text-[10px] font-bold text-[#111111]"
+                class="ml-1.5 shrink-0 rounded-full border border-[#D68D1C] bg-[#F8B142] px-1.5 py-0.5 font-mono text-[10px] font-bold text-[#1A1513]"
               >
                 {missingCliCount}
               </span>
@@ -346,29 +351,29 @@
       </div>
 
       <div
-        class="mt-2 border-t border-[#E5E3DD] px-2 pt-2.5 text-[10px] leading-relaxed text-[#787772]"
+        class="mt-2 border-t border-[#E6E0D6] px-2 pt-2.5 text-[10px] leading-relaxed text-[#7D716A]"
       >
-        Auto-saved locally to <span class="font-mono text-[#52524E]">settings.json</span>.
+        Auto-saved locally to <span class="font-mono text-[#544943]">settings.json</span>.
       </div>
     </nav>
 
     <!-- Category Content Pane -->
     <div class="flex min-w-0 flex-1 flex-col bg-white">
       <header
-        class="flex items-center justify-between border-b border-[#E5E3DD] px-5 py-3.5"
+        class="flex items-center justify-between border-b border-[#E6E0D6] px-5 py-3.5"
       >
         <div>
-          <h2 class="text-sm font-bold tracking-[-0.02em] text-[#111111]">
+          <h2 class="text-sm font-bold tracking-[-0.02em] text-[#1A1513]">
             {categories.find((c) => c.id === activeCategory)?.label}
           </h2>
-          <p class="text-[11px] text-[#787772]">
+          <p class="text-[11px] text-[#7D716A]">
             {categories.find((c) => c.id === activeCategory)?.desc}
           </p>
         </div>
         <button
           type="button"
           onclick={onClose}
-          class="rounded-md bg-[#111111] px-3 py-1.5 text-xs font-medium text-white transition hover:bg-[#2A2A2A]"
+          class="rounded-md bg-[#1A1513] px-3 py-1.5 text-xs font-medium text-white transition hover:bg-[#332925]"
         >
           Done
         </button>
@@ -380,7 +385,7 @@
             <div class="space-y-1.5">
               <label
                 for="setting-default-mode"
-                class="block text-xs font-semibold text-[#111111]"
+                class="block text-xs font-semibold text-[#1A1513]"
               >
                 Default Workflow Mode
               </label>
@@ -388,7 +393,7 @@
                 id="setting-default-mode"
                 value={settings.defaultMode}
                 onchange={handleDefaultModeChange}
-                class="w-full rounded-lg border border-[#E5E3DD] bg-[#F8F7F4] px-3 py-2 text-xs font-medium text-[#111111] outline-none focus:border-[#111111] focus:bg-white"
+                class="w-full rounded-lg border border-[#E6E0D6] bg-[#FAF8F4] px-3 py-2 text-xs font-medium text-[#1A1513] outline-none focus:border-[#1A1513] focus:bg-white"
               >
                 <option value="ripAndEncode">Rip + Encode (Two-Stage Pipeline)</option>
                 <option value="ripOnly">Rip Only (MakeMKV Remux)</option>
@@ -396,16 +401,16 @@
               </select>
             </div>
 
-            <div class="divide-y divide-[#ECEAE4] rounded-xl border border-[#E5E3DD] bg-[#FAF9F6]">
+            <div class="divide-y divide-[#EDE7DE] rounded-xl border border-[#E6E0D6] bg-[#F7F4EE]">
               <label
                 for="setting-auto-setup"
                 class="flex cursor-pointer items-start justify-between gap-3 p-3.5"
               >
                 <div>
-                  <div class="text-xs font-semibold text-[#111111]">
+                  <div class="text-xs font-semibold text-[#1A1513]">
                     Auto-setup missing CLIs on first run
                   </div>
-                  <div class="mt-0.5 text-[11px] text-[#6B6A65]">
+                  <div class="mt-0.5 text-[11px] text-[#70645D]">
                     Delegates missing CLI installs to your OS package manager
                     (winget/brew) on first launch.
                   </div>
@@ -419,7 +424,7 @@
                       "autoSetupOnFirstRun",
                       e.currentTarget.checked,
                     )}
-                  class="mt-0.5 h-4 w-4 accent-[#111111]"
+                  class="mt-0.5 h-4 w-4 accent-[#1A1513]"
                 />
               </label>
 
@@ -428,10 +433,10 @@
                 class="flex cursor-pointer items-start justify-between gap-3 p-3.5"
               >
                 <div>
-                  <div class="text-xs font-semibold text-[#111111]">
+                  <div class="text-xs font-semibold text-[#1A1513]">
                     Keep intermediate temp MKV files
                   </div>
-                  <div class="mt-0.5 text-[11px] text-[#6B6A65]">
+                  <div class="mt-0.5 text-[11px] text-[#70645D]">
                     Skip Stage 3 temp cleanup after HandBrakeCLI finishes encoding.
                   </div>
                 </div>
@@ -441,7 +446,7 @@
                   checked={settings.keepTempMkv}
                   onchange={(e) =>
                     onUpdateSetting("keepTempMkv", e.currentTarget.checked)}
-                  class="mt-0.5 h-4 w-4 accent-[#111111]"
+                  class="mt-0.5 h-4 w-4 accent-[#1A1513]"
                 />
               </label>
 
@@ -450,10 +455,10 @@
                 class="flex cursor-pointer items-start justify-between gap-3 p-3.5"
               >
                 <div>
-                  <div class="text-xs font-semibold text-[#111111]">
+                  <div class="text-xs font-semibold text-[#1A1513]">
                     Auto-eject optical disc when ripping completes
                   </div>
-                  <div class="mt-0.5 text-[11px] text-[#6B6A65]">
+                  <div class="mt-0.5 text-[11px] text-[#70645D]">
                     Ejects the drive after Stage 1 so you can load the next disc
                     while Stage 2 encodes.
                   </div>
@@ -464,13 +469,13 @@
                   checked={settings.autoEjectDisc}
                   onchange={(e) =>
                     onUpdateSetting("autoEjectDisc", e.currentTarget.checked)}
-                  class="mt-0.5 h-4 w-4 accent-[#111111]"
+                  class="mt-0.5 h-4 w-4 accent-[#1A1513]"
                 />
               </label>
             </div>
 
             <div
-              class="flex items-center justify-between gap-3 rounded-xl border border-[#E5E3DD] bg-[#F8F7F4] p-3.5 text-[11px] leading-relaxed text-[#5C5B57]"
+              class="flex items-center justify-between gap-3 rounded-xl border border-[#E6E0D6] bg-[#FAF8F4] p-3.5 text-[11px] leading-relaxed text-[#61554F]"
             >
               <div class="flex items-center gap-3">
                 <RipDaddyLogo class="h-8 w-8" alt="" />
@@ -485,7 +490,7 @@
                   onClose();
                   onOpenSetupWizard();
                 }}
-                class="shrink-0 rounded-md border border-[#DFDDD6] bg-white px-2.5 py-1.5 text-[11px] font-semibold text-[#111111] hover:bg-[#EFECE6]"
+                class="shrink-0 rounded-md border border-[#DAD3C7] bg-white px-2.5 py-1.5 text-[11px] font-semibold text-[#1A1513] hover:bg-[#EDE7DD]"
               >
                 Setup Wizard
               </button>
@@ -495,10 +500,10 @@
         {:else if activeCategory === "binaries"}
           <div class="space-y-3">
             <div class="flex items-center justify-between gap-2">
-              <div class="text-[11px] text-[#6B6A65]">
+              <div class="text-[11px] text-[#70645D]">
                 {#if binaries?.availablePackageManagers.length}
                   Package managers:
-                  <span class="font-mono font-medium text-[#111111]">
+                  <span class="font-mono font-medium text-[#1A1513]">
                     {binaries.availablePackageManagers.join(", ")}
                   </span>
                 {:else}
@@ -510,7 +515,7 @@
                 type="button"
                 onclick={onRecheckBinaries}
                 disabled={checkingBinaries || installingBinary !== null}
-                class="shrink-0 rounded-md border border-[#E5E3DD] bg-white px-2.5 py-1 text-[11px] font-semibold text-[#111111] transition hover:bg-[#F8F7F4] disabled:opacity-50"
+                class="shrink-0 rounded-md border border-[#E6E0D6] bg-white px-2.5 py-1 text-[11px] font-semibold text-[#1A1513] transition hover:bg-[#FAF8F4] disabled:opacity-50"
               >
                 {checkingBinaries ? "Checking..." : "Re-check"}
               </button>
@@ -521,7 +526,7 @@
                 type="button"
                 onclick={onAutoSetupAll}
                 disabled={installingBinary !== null}
-                class="w-full rounded-md bg-[#1D8BF8] px-3 py-2 text-xs font-semibold text-white transition hover:bg-[#137CE5] disabled:opacity-50"
+                class="w-full rounded-md bg-[#11824F] px-3 py-2 text-xs font-semibold text-white transition hover:bg-[#0D6E42] disabled:opacity-50"
               >
                 {installingBinary === "all"
                   ? "Installing missing CLIs via OS package manager..."
@@ -539,7 +544,7 @@
 
             {#if setupOutcomes.length > 0}
               <div
-                class="space-y-1 rounded-lg border border-[#E5E3DD] bg-[#F8F7F4] p-2.5 text-[11px]"
+                class="space-y-1 rounded-lg border border-[#E6E0D6] bg-[#FAF8F4] p-2.5 text-[11px]"
               >
                 {#each setupOutcomes as outcome (outcome.binary)}
                   <p
@@ -555,14 +560,14 @@
 
             <!-- makemkvcon card -->
             <div
-              class="space-y-2.5 rounded-xl border border-[#E5E3DD] bg-[#FAF9F6] p-3.5"
+              class="space-y-2.5 rounded-xl border border-[#E6E0D6] bg-[#F7F4EE] p-3.5"
             >
               <div class="flex items-center justify-between gap-2">
                 <div class="flex items-center gap-2">
                   <span
                     class={`h-2.5 w-2.5 rounded-full ${statusDotClass(binaries?.makemkv)}`}
                   ></span>
-                  <span class="font-mono text-xs font-bold text-[#111111]">
+                  <span class="font-mono text-xs font-bold text-[#1A1513]">
                     makemkvcon
                   </span>
                 </div>
@@ -570,8 +575,8 @@
                   <span
                     class={`rounded-full border px-2 py-0.5 font-mono text-[10px] font-semibold ${
                       binaries.makemkv.found
-                        ? "border-[#24B465] bg-[#3AD27E] text-[#111111]"
-                        : "border-[#E5E3DD] bg-white text-[#5C5B57]"
+                        ? "border-[#1FA868] bg-[#4CDE99] text-[#1A1513]"
+                        : "border-[#E6E0D6] bg-white text-[#61554F]"
                     }`}
                   >
                     {binaries.makemkv.found
@@ -583,7 +588,7 @@
 
               {#if binaries?.makemkv.path}
                 <p
-                  class="truncate rounded border border-[#E5E3DD] bg-white px-2 py-1 font-mono text-[11px] text-[#52524E]"
+                  class="truncate rounded border border-[#E6E0D6] bg-white px-2 py-1 font-mono text-[11px] text-[#544943]"
                   title={binaries.makemkv.path}
                 >
                   {binaries.makemkv.path}
@@ -598,12 +603,12 @@
                     {binaries.makemkv.error}
                   </p>
                 {:else}
-                  <p class="text-[11px] leading-relaxed text-[#6B6A65]">
+                  <p class="text-[11px] leading-relaxed text-[#70645D]">
                     {binaries.makemkv.installHint.note}
                   </p>
                   <div class="flex items-center gap-1.5">
                     <code
-                      class="flex-1 truncate rounded border border-[#E5E3DD] bg-white px-2 py-1 font-mono text-[10px] text-[#111111]"
+                      class="flex-1 truncate rounded border border-[#E6E0D6] bg-white px-2 py-1 font-mono text-[10px] text-[#1A1513]"
                       title={binaries.makemkv.installHint.command}
                     >
                       {binaries.makemkv.installHint.command}
@@ -615,7 +620,7 @@
                           void copyCommand(binaries.makemkv.installHint.command);
                         }
                       }}
-                      class="rounded border border-[#E5E3DD] bg-white px-2 py-1 text-[10px] font-semibold text-[#111111] hover:bg-[#F2F0EA]"
+                      class="rounded border border-[#E6E0D6] bg-white px-2 py-1 text-[10px] font-semibold text-[#1A1513] hover:bg-[#F2EDE5]"
                     >
                       {copiedCommand === binaries.makemkv.installHint.command
                         ? "Copied"
@@ -631,7 +636,7 @@
                     type="button"
                     onclick={() => onInstallSingle("makeMkv")}
                     disabled={installingBinary !== null}
-                    class="flex-1 rounded-md bg-[#1D8BF8] px-2.5 py-1.5 text-[11px] font-semibold text-white hover:bg-[#137CE5] disabled:opacity-50"
+                    class="flex-1 rounded-md bg-[#11824F] px-2.5 py-1.5 text-[11px] font-semibold text-white hover:bg-[#0D6E42] disabled:opacity-50"
                   >
                     {installingBinary === "makeMkv"
                       ? "Installing..."
@@ -641,7 +646,7 @@
                 <button
                   type="button"
                   onclick={() => onBrowseBinary("makemkv")}
-                  class="flex-1 rounded-md border border-[#E5E3DD] bg-white px-2.5 py-1.5 text-[11px] font-semibold text-[#111111] transition hover:bg-[#F2F0EA]"
+                  class="flex-1 rounded-md border border-[#E6E0D6] bg-white px-2.5 py-1.5 text-[11px] font-semibold text-[#1A1513] transition hover:bg-[#F2EDE5]"
                 >
                   Select Path...
                 </button>
@@ -649,7 +654,7 @@
                   <button
                     type="button"
                     onclick={() => onResetBinaryPath("makemkv")}
-                    class="rounded-md border border-[#E5E3DD] bg-white px-2.5 py-1.5 text-[11px] font-medium text-[#5C5B57] hover:text-[#111111]"
+                    class="rounded-md border border-[#E6E0D6] bg-white px-2.5 py-1.5 text-[11px] font-medium text-[#61554F] hover:text-[#1A1513]"
                   >
                     Auto
                   </button>
@@ -659,14 +664,14 @@
 
             <!-- HandBrakeCLI card -->
             <div
-              class="space-y-2.5 rounded-xl border border-[#E5E3DD] bg-[#FAF9F6] p-3.5"
+              class="space-y-2.5 rounded-xl border border-[#E6E0D6] bg-[#F7F4EE] p-3.5"
             >
               <div class="flex items-center justify-between gap-2">
                 <div class="flex items-center gap-2">
                   <span
                     class={`h-2.5 w-2.5 rounded-full ${statusDotClass(binaries?.handbrake)}`}
                   ></span>
-                  <span class="font-mono text-xs font-bold text-[#111111]">
+                  <span class="font-mono text-xs font-bold text-[#1A1513]">
                     HandBrakeCLI
                   </span>
                 </div>
@@ -674,8 +679,8 @@
                   <span
                     class={`rounded-full border px-2 py-0.5 font-mono text-[10px] font-semibold ${
                       binaries.handbrake.found
-                        ? "border-[#24B465] bg-[#3AD27E] text-[#111111]"
-                        : "border-[#E5E3DD] bg-white text-[#5C5B57]"
+                        ? "border-[#1FA868] bg-[#4CDE99] text-[#1A1513]"
+                        : "border-[#E6E0D6] bg-white text-[#61554F]"
                     }`}
                   >
                     {binaries.handbrake.found
@@ -687,7 +692,7 @@
 
               {#if binaries?.handbrake.path}
                 <p
-                  class="truncate rounded border border-[#E5E3DD] bg-white px-2 py-1 font-mono text-[11px] text-[#52524E]"
+                  class="truncate rounded border border-[#E6E0D6] bg-white px-2 py-1 font-mono text-[11px] text-[#544943]"
                   title={binaries.handbrake.path}
                 >
                   {binaries.handbrake.path}
@@ -702,12 +707,12 @@
                     {binaries.handbrake.error}
                   </p>
                 {:else}
-                  <p class="text-[11px] leading-relaxed text-[#6B6A65]">
+                  <p class="text-[11px] leading-relaxed text-[#70645D]">
                     {binaries.handbrake.installHint.note}
                   </p>
                   <div class="flex items-center gap-1.5">
                     <code
-                      class="flex-1 truncate rounded border border-[#E5E3DD] bg-white px-2 py-1 font-mono text-[10px] text-[#111111]"
+                      class="flex-1 truncate rounded border border-[#E6E0D6] bg-white px-2 py-1 font-mono text-[10px] text-[#1A1513]"
                       title={binaries.handbrake.installHint.command}
                     >
                       {binaries.handbrake.installHint.command}
@@ -721,7 +726,7 @@
                           );
                         }
                       }}
-                      class="rounded border border-[#E5E3DD] bg-white px-2 py-1 text-[10px] font-semibold text-[#111111] hover:bg-[#F2F0EA]"
+                      class="rounded border border-[#E6E0D6] bg-white px-2 py-1 text-[10px] font-semibold text-[#1A1513] hover:bg-[#F2EDE5]"
                     >
                       {copiedCommand === binaries.handbrake.installHint.command
                         ? "Copied"
@@ -737,7 +742,7 @@
                     type="button"
                     onclick={() => onInstallSingle("handBrake")}
                     disabled={installingBinary !== null}
-                    class="flex-1 rounded-md bg-[#1D8BF8] px-2.5 py-1.5 text-[11px] font-semibold text-white hover:bg-[#137CE5] disabled:opacity-50"
+                    class="flex-1 rounded-md bg-[#11824F] px-2.5 py-1.5 text-[11px] font-semibold text-white hover:bg-[#0D6E42] disabled:opacity-50"
                   >
                     {installingBinary === "handBrake"
                       ? "Installing..."
@@ -747,7 +752,7 @@
                 <button
                   type="button"
                   onclick={() => onBrowseBinary("handbrake")}
-                  class="flex-1 rounded-md border border-[#E5E3DD] bg-white px-2.5 py-1.5 text-[11px] font-semibold text-[#111111] transition hover:bg-[#F2F0EA]"
+                  class="flex-1 rounded-md border border-[#E6E0D6] bg-white px-2.5 py-1.5 text-[11px] font-semibold text-[#1A1513] transition hover:bg-[#F2EDE5]"
                 >
                   Select Path...
                 </button>
@@ -755,7 +760,7 @@
                   <button
                     type="button"
                     onclick={() => onResetBinaryPath("handbrake")}
-                    class="rounded-md border border-[#E5E3DD] bg-white px-2.5 py-1.5 text-[11px] font-medium text-[#5C5B57] hover:text-[#111111]"
+                    class="rounded-md border border-[#E6E0D6] bg-white px-2.5 py-1.5 text-[11px] font-medium text-[#61554F] hover:text-[#1A1513]"
                   >
                     Auto
                   </button>
@@ -767,14 +772,14 @@
         {:else if activeCategory === "storage"}
           <div class="space-y-3">
             <div
-              class="space-y-2.5 rounded-xl border border-[#E5E3DD] bg-[#FAF9F6] p-3.5"
+              class="space-y-2.5 rounded-xl border border-[#E6E0D6] bg-[#F7F4EE] p-3.5"
             >
               <div class="flex items-center justify-between gap-2">
                 <div>
-                  <div class="text-xs font-semibold text-[#111111]">
+                  <div class="text-xs font-semibold text-[#1A1513]">
                     Output Directory
                   </div>
-                  <div class="text-[11px] text-[#6B6A65]">
+                  <div class="text-[11px] text-[#70645D]">
                     Destination for final movies and TV show folders.
                   </div>
                 </div>
@@ -782,7 +787,7 @@
                   <button
                     type="button"
                     onclick={() => onBrowseDirectory("outputDir")}
-                    class="rounded-md border border-[#E5E3DD] bg-white px-2.5 py-1 text-[11px] font-semibold text-[#111111] hover:bg-[#F2F0EA]"
+                    class="rounded-md border border-[#E6E0D6] bg-white px-2.5 py-1 text-[11px] font-semibold text-[#1A1513] hover:bg-[#F2EDE5]"
                   >
                     Change
                   </button>
@@ -790,7 +795,7 @@
                     <button
                       type="button"
                       onclick={() => onResetDirectory("outputDir")}
-                      class="rounded-md border border-[#E5E3DD] bg-white px-2 py-1 text-[11px] text-[#6B6A65] hover:text-[#111111]"
+                      class="rounded-md border border-[#E6E0D6] bg-white px-2 py-1 text-[11px] text-[#70645D] hover:text-[#1A1513]"
                     >
                       Default
                     </button>
@@ -798,7 +803,7 @@
                 </div>
               </div>
               <p
-                class="truncate rounded border border-[#E5E3DD] bg-white px-2.5 py-1.5 font-mono text-[11px] text-[#111111]"
+                class="truncate rounded border border-[#E6E0D6] bg-white px-2.5 py-1.5 font-mono text-[11px] text-[#1A1513]"
                 title={settings.outputDir ||
                   binaries?.defaultPaths.outputDir ||
                   ""}
@@ -810,14 +815,14 @@
             </div>
 
             <div
-              class="space-y-2.5 rounded-xl border border-[#E5E3DD] bg-[#FAF9F6] p-3.5"
+              class="space-y-2.5 rounded-xl border border-[#E6E0D6] bg-[#F7F4EE] p-3.5"
             >
               <div class="flex items-center justify-between gap-2">
                 <div>
-                  <div class="text-xs font-semibold text-[#111111]">
+                  <div class="text-xs font-semibold text-[#1A1513]">
                     Temp Rip Folder
                   </div>
-                  <div class="text-[11px] text-[#6B6A65]">
+                  <div class="text-[11px] text-[#70645D]">
                     Intermediate MKV staging directory between Rip and Encode.
                   </div>
                 </div>
@@ -825,7 +830,7 @@
                   <button
                     type="button"
                     onclick={() => onBrowseDirectory("tempDir")}
-                    class="rounded-md border border-[#E5E3DD] bg-white px-2.5 py-1 text-[11px] font-semibold text-[#111111] hover:bg-[#F2F0EA]"
+                    class="rounded-md border border-[#E6E0D6] bg-white px-2.5 py-1 text-[11px] font-semibold text-[#1A1513] hover:bg-[#F2EDE5]"
                   >
                     Change
                   </button>
@@ -833,7 +838,7 @@
                     <button
                       type="button"
                       onclick={() => onResetDirectory("tempDir")}
-                      class="rounded-md border border-[#E5E3DD] bg-white px-2 py-1 text-[11px] text-[#6B6A65] hover:text-[#111111]"
+                      class="rounded-md border border-[#E6E0D6] bg-white px-2 py-1 text-[11px] text-[#70645D] hover:text-[#1A1513]"
                     >
                       Default
                     </button>
@@ -841,7 +846,7 @@
                 </div>
               </div>
               <p
-                class="truncate rounded border border-[#E5E3DD] bg-white px-2.5 py-1.5 font-mono text-[11px] text-[#111111]"
+                class="truncate rounded border border-[#E6E0D6] bg-white px-2.5 py-1.5 font-mono text-[11px] text-[#1A1513]"
                 title={settings.tempDir || binaries?.defaultPaths.tempDir || ""}
               >
                 {settings.tempDir ||
@@ -854,20 +859,20 @@
         {:else if activeCategory === "encoding"}
           <div class="space-y-4">
             <!-- Quality Profile Matrix Header: Local vs Remote + 480p / 720p / 1080p / 4K -->
-            <div class="space-y-2.5 rounded-xl border border-[#E5E3DD] bg-[#FAF9F6] p-3.5">
+            <div class="space-y-2.5 rounded-xl border border-[#E6E0D6] bg-[#F7F4EE] p-3.5">
               <div class="flex flex-wrap items-center justify-between gap-2">
                 <div>
-                  <div class="text-xs font-bold text-[#111111]">
+                  <div class="text-xs font-bold text-[#1A1513]">
                     Resolution × Delivery Quality Matrix
                   </div>
-                  <div class="text-[11px] text-[#6B6A65]">
+                  <div class="text-[11px] text-[#70645D]">
                     Customize HandBrake settings per pixel tier (up to 4K) for
                     Local LAN vs Remote streaming.
                   </div>
                 </div>
 
                 <div
-                  class="inline-flex rounded-full border border-[#DFDDD6] bg-white p-0.5 text-[11px]"
+                  class="inline-flex rounded-full border border-[#DAD3C7] bg-white p-0.5 text-[11px]"
                   role="group"
                   aria-label="Edit delivery target"
                 >
@@ -876,8 +881,8 @@
                     onclick={() => (editDelivery = "local")}
                     class={`rounded-full px-2.5 py-0.5 font-semibold transition ${
                       editDelivery === "local"
-                        ? "bg-[#3AD27E] text-[#111111]"
-                        : "text-[#6B6A65] hover:text-[#111111]"
+                        ? "bg-[#4CDE99] text-[#1A1513]"
+                        : "text-[#70645D] hover:text-[#1A1513]"
                     }`}
                   >
                     Local
@@ -887,8 +892,8 @@
                     onclick={() => (editDelivery = "remote")}
                     class={`rounded-full px-2.5 py-0.5 font-semibold transition ${
                       editDelivery === "remote"
-                        ? "bg-[#58B0F9] text-[#111111]"
-                        : "text-[#6B6A65] hover:text-[#111111]"
+                        ? "bg-[#5BC0EB] text-[#1A1513]"
+                        : "text-[#70645D] hover:text-[#1A1513]"
                     }`}
                   >
                     Remote
@@ -908,19 +913,19 @@
                     onclick={() => (editResolution = tier.id)}
                     class={`rounded-lg border p-2 text-left transition ${
                       editResolution === tier.id
-                        ? "border-[#111111] bg-white shadow-[0_1px_2px_rgba(0,0,0,0.06)]"
-                        : "border-[#E5E3DD] bg-white/60 hover:bg-white"
+                        ? "border-[#1A1513] bg-white shadow-[0_1px_2px_rgba(0,0,0,0.06)]"
+                        : "border-[#E6E0D6] bg-white/60 hover:bg-white"
                     }`}
                   >
                     <div class="flex items-center justify-between">
-                      <span class="font-mono text-xs font-bold text-[#111111]">
+                      <span class="font-mono text-xs font-bold text-[#1A1513]">
                         {tier.shortLabel}
                       </span>
-                      <span class="font-mono text-[9px] text-[#787772]">
+                      <span class="font-mono text-[9px] text-[#7D716A]">
                         {slot ? `RF ${slot.rfQuality.toFixed(0)}` : ""}
                       </span>
                     </div>
-                    <div class="mt-0.5 truncate font-mono text-[10px] text-[#6B6A65]">
+                    <div class="mt-0.5 truncate font-mono text-[10px] text-[#70645D]">
                       {slot ? shortEncoderLabel(slot.encoder) : tier.dims}
                     </div>
                   </button>
@@ -928,19 +933,19 @@
               </div>
 
               {#if editingProfile}
-                <div class="space-y-3 border-t border-[#E5E3DD] pt-3">
+                <div class="space-y-3 border-t border-[#E6E0D6] pt-3">
                   <div class="flex items-center justify-between">
-                    <span class="text-xs font-bold text-[#111111]">
+                    <span class="text-xs font-bold text-[#1A1513]">
                       {editingProfile.label}
                     </span>
                     <div class="flex items-center gap-2">
-                      <span class="font-mono text-[10px] text-[#6B6A65]">
+                      <span class="font-mono text-[10px] text-[#70645D]">
                         {editingProfile.estimatedBitrateLabel}
                       </span>
                       <button
                         type="button"
                         onclick={() => onResetQualityProfiles(editingProfile.id)}
-                        class="rounded border border-[#DFDDD6] bg-white px-2 py-0.5 text-[10px] font-semibold text-[#52524E] hover:text-[#111111]"
+                        class="rounded border border-[#DAD3C7] bg-white px-2 py-0.5 text-[10px] font-semibold text-[#544943] hover:text-[#1A1513]"
                       >
                         Reset Slot
                       </button>
@@ -952,12 +957,12 @@
                     <div class="flex items-center justify-between text-[11px]">
                       <label
                         for="setting-rf-slider"
-                        class="font-semibold text-[#111111]"
+                        class="font-semibold text-[#1A1513]"
                       >
                         Constant Quality (RF {editingProfile.rfQuality.toFixed(1)})
                       </label>
                       <span
-                        class="rounded border border-[#B5DAFA] bg-[#DCEEFF] px-1.5 py-0.5 font-mono text-[10px] font-medium text-[#155CA2]"
+                        class="rounded border border-[#9CD9F5] bg-[#E6F6FD] px-1.5 py-0.5 font-mono text-[10px] font-medium text-[#0E5678]"
                       >
                         {rfQualityTierLabel(editingProfile.rfQuality)}
                       </span>
@@ -973,10 +978,10 @@
                         patchEditingProfile({
                           rfQuality: Number.parseFloat(e.currentTarget.value),
                         })}
-                      class="w-full accent-[#111111]"
+                      class="w-full accent-[#1A1513]"
                     />
                     <div
-                      class="flex justify-between font-mono text-[9px] text-[#787772]"
+                      class="flex justify-between font-mono text-[9px] text-[#7D716A]"
                     >
                       <span>14 (Archival / Larger)</span>
                       <span>20 (Balanced)</span>
@@ -988,7 +993,7 @@
                     <div class="space-y-1">
                       <label
                         for="setting-slot-encoder"
-                        class="block text-[11px] font-semibold text-[#52524E]"
+                        class="block text-[11px] font-semibold text-[#544943]"
                       >
                         Video Encoder
                       </label>
@@ -996,7 +1001,7 @@
                         id="setting-slot-encoder"
                         value={editingProfile.encoder}
                         onchange={handleEncoderChange}
-                        class="w-full rounded-md border border-[#DFDDD6] bg-white px-2 py-1.5 text-xs text-[#111111] outline-none focus:border-[#111111]"
+                        class="w-full rounded-md border border-[#DAD3C7] bg-white px-2 py-1.5 text-xs text-[#1A1513] outline-none focus:border-[#1A1513]"
                       >
                         {#each VIDEO_ENCODERS as enc (enc.id)}
                           <option value={enc.id}>{enc.label}</option>
@@ -1007,7 +1012,7 @@
                     <div class="space-y-1">
                       <label
                         for="setting-slot-speed"
-                        class="block text-[11px] font-semibold text-[#52524E]"
+                        class="block text-[11px] font-semibold text-[#544943]"
                       >
                         Encoder Speed Preset
                       </label>
@@ -1018,7 +1023,7 @@
                           patchEditingProfile({
                             encoderPreset: e.currentTarget.value,
                           })}
-                        class="w-full rounded-md border border-[#DFDDD6] bg-white px-2 py-1.5 font-mono text-xs text-[#111111] outline-none focus:border-[#111111]"
+                        class="w-full rounded-md border border-[#DAD3C7] bg-white px-2 py-1.5 font-mono text-xs text-[#1A1513] outline-none focus:border-[#1A1513]"
                       >
                         {#each ENCODER_PRESETS as speed (speed)}
                           <option value={speed}>{speed}</option>
@@ -1029,7 +1034,7 @@
                     <div class="space-y-1">
                       <label
                         for="setting-slot-audio"
-                        class="block text-[11px] font-semibold text-[#52524E]"
+                        class="block text-[11px] font-semibold text-[#544943]"
                       >
                         Audio Strategy
                       </label>
@@ -1037,7 +1042,7 @@
                         id="setting-slot-audio"
                         value={editingProfile.audioMode}
                         onchange={handleAudioModeChange}
-                        class="w-full rounded-md border border-[#DFDDD6] bg-white px-2 py-1.5 text-xs text-[#111111] outline-none focus:border-[#111111]"
+                        class="w-full rounded-md border border-[#DAD3C7] bg-white px-2 py-1.5 text-xs text-[#1A1513] outline-none focus:border-[#1A1513]"
                       >
                         <option value="passthrough">Passthrough + AAC Fallback</option>
                         <option value="aac51">5.1 Surround AAC</option>
@@ -1049,7 +1054,7 @@
                       <div class="space-y-1">
                         <label
                           for="setting-slot-bitrate"
-                          class="block text-[11px] font-semibold text-[#52524E]"
+                          class="block text-[11px] font-semibold text-[#544943]"
                         >
                           Audio kbps
                         </label>
@@ -1063,7 +1068,7 @@
                                 10,
                               ),
                             })}
-                          class="w-full rounded-md border border-[#DFDDD6] bg-white px-2 py-1.5 font-mono text-xs text-[#111111] outline-none focus:border-[#111111]"
+                          class="w-full rounded-md border border-[#DAD3C7] bg-white px-2 py-1.5 font-mono text-xs text-[#1A1513] outline-none focus:border-[#1A1513]"
                         >
                           {#each AUDIO_BITRATES as kbps (kbps)}
                             <option value={kbps}>{kbps}k</option>
@@ -1074,7 +1079,7 @@
                       <div class="space-y-1">
                         <label
                           for="setting-slot-container"
-                          class="block text-[11px] font-semibold text-[#52524E]"
+                          class="block text-[11px] font-semibold text-[#544943]"
                         >
                           Container
                         </label>
@@ -1085,7 +1090,7 @@
                             patchEditingProfile({
                               container: e.currentTarget.value,
                             })}
-                          class="w-full rounded-md border border-[#DFDDD6] bg-white px-2 py-1.5 font-mono text-xs text-[#111111] outline-none focus:border-[#111111]"
+                          class="w-full rounded-md border border-[#DAD3C7] bg-white px-2 py-1.5 font-mono text-xs text-[#1A1513] outline-none focus:border-[#1A1513]"
                         >
                           <option value="mkv">.mkv</option>
                           <option value="mp4">.mp4</option>
@@ -1098,7 +1103,7 @@
                     <div class="space-y-1">
                       <label
                         for="setting-slot-subtitles"
-                        class="block text-[11px] font-semibold text-[#52524E]"
+                        class="block text-[11px] font-semibold text-[#544943]"
                       >
                         Subtitles
                       </label>
@@ -1106,7 +1111,7 @@
                         id="setting-slot-subtitles"
                         value={editingProfile.subtitleMode}
                         onchange={handleSubtitleModeChange}
-                        class="w-full rounded-md border border-[#DFDDD6] bg-white px-2 py-1.5 text-xs text-[#111111] outline-none focus:border-[#111111]"
+                        class="w-full rounded-md border border-[#DAD3C7] bg-white px-2 py-1.5 text-xs text-[#1A1513] outline-none focus:border-[#1A1513]"
                       >
                         <option value="all">Keep All Subtitles</option>
                         <option value="foreignScan">Foreign Audio Scan (Forced)</option>
@@ -1117,7 +1122,7 @@
                     <div class="space-y-1.5 pt-3 text-[11px]">
                       <label
                         for="setting-slot-decomb"
-                        class="flex cursor-pointer items-center gap-2 font-medium text-[#111111]"
+                        class="flex cursor-pointer items-center gap-2 font-medium text-[#1A1513]"
                       >
                         <input
                           id="setting-slot-decomb"
@@ -1127,14 +1132,14 @@
                             patchEditingProfile({
                               decomb: e.currentTarget.checked,
                             })}
-                          class="h-3.5 w-3.5 accent-[#111111]"
+                          class="h-3.5 w-3.5 accent-[#1A1513]"
                         />
                         <span>Decomb / Deinterlace</span>
                       </label>
 
                       <label
                         for="setting-slot-webopt"
-                        class="flex cursor-pointer items-center gap-2 font-medium text-[#111111]"
+                        class="flex cursor-pointer items-center gap-2 font-medium text-[#1A1513]"
                       >
                         <input
                           id="setting-slot-webopt"
@@ -1145,7 +1150,7 @@
                             patchEditingProfile({
                               webOptimize: e.currentTarget.checked,
                             })}
-                          class="h-3.5 w-3.5 accent-[#111111] disabled:opacity-40"
+                          class="h-3.5 w-3.5 accent-[#1A1513] disabled:opacity-40"
                         />
                         <span>MP4 Web Optimize (Fast Start)</span>
                       </label>
@@ -1155,12 +1160,12 @@
                   <!-- Live HandBrakeCLI Command Preview -->
                   <div class="space-y-1">
                     <div
-                      class="text-[10px] font-bold uppercase tracking-[0.08em] text-[#787772]"
+                      class="text-[10px] font-bold uppercase tracking-[0.08em] text-[#7D716A]"
                     >
                       Generated HandBrakeCLI Flags
                     </div>
                     <code
-                      class="block max-h-16 overflow-y-auto break-all rounded-md border border-[#E5E3DD] bg-white px-2.5 py-1.5 font-mono text-[10px] leading-relaxed text-[#3F3E3B]"
+                      class="block max-h-16 overflow-y-auto break-all rounded-md border border-[#E6E0D6] bg-white px-2.5 py-1.5 font-mono text-[10px] leading-relaxed text-[#3F3530]"
                     >
                       {cliFlagsPreview}
                     </code>
@@ -1174,7 +1179,7 @@
               <div class="space-y-1">
                 <label
                   for="setting-min-length"
-                  class="block text-xs font-semibold text-[#111111]"
+                  class="block text-xs font-semibold text-[#1A1513]"
                 >
                   Min Disc Title Length (sec)
                 </label>
@@ -1191,7 +1196,7 @@
                       Number.isFinite(parsed) && parsed >= 0 ? parsed : 120,
                     );
                   }}
-                  class="w-full rounded-lg border border-[#E5E3DD] bg-[#F8F7F4] px-3 py-1.5 font-mono text-xs text-[#111111] outline-none focus:border-[#111111] focus:bg-white"
+                  class="w-full rounded-lg border border-[#E6E0D6] bg-[#FAF8F4] px-3 py-1.5 font-mono text-xs text-[#1A1513] outline-none focus:border-[#1A1513] focus:bg-white"
                 />
               </div>
 
@@ -1199,7 +1204,7 @@
                 <button
                   type="button"
                   onclick={() => onResetQualityProfiles()}
-                  class="rounded-md border border-[#DFDDD6] bg-white px-3 py-1.5 text-xs font-semibold text-[#52524E] hover:bg-[#F8F7F4] hover:text-[#111111]"
+                  class="rounded-md border border-[#DAD3C7] bg-white px-3 py-1.5 text-xs font-semibold text-[#544943] hover:bg-[#FAF8F4] hover:text-[#1A1513]"
                 >
                   Reset All 8 Profiles
                 </button>
@@ -1207,14 +1212,14 @@
             </div>
 
             <div
-              class="space-y-2 rounded-xl border border-[#E5E3DD] bg-[#FAF9F6] p-3"
+              class="space-y-2 rounded-xl border border-[#E6E0D6] bg-[#F7F4EE] p-3"
             >
               <div class="flex items-center justify-between gap-2">
                 <div>
-                  <div class="text-xs font-semibold text-[#111111]">
+                  <div class="text-xs font-semibold text-[#1A1513]">
                     Optional Custom HandBrake Preset JSON
                   </div>
-                  <div class="text-[11px] text-[#6B6A65]">
+                  <div class="text-[11px] text-[#70645D]">
                     Override matrix with an exported GUI preset via
                     <span class="font-mono">--preset-import-file</span>.
                   </div>
@@ -1223,7 +1228,7 @@
                   <button
                     type="button"
                     onclick={onBrowseCustomPreset}
-                    class="rounded-md border border-[#E5E3DD] bg-white px-2.5 py-1 text-[11px] font-semibold text-[#111111] hover:bg-[#F2F0EA]"
+                    class="rounded-md border border-[#E6E0D6] bg-white px-2.5 py-1 text-[11px] font-semibold text-[#1A1513] hover:bg-[#F2EDE5]"
                   >
                     Browse...
                   </button>
@@ -1231,14 +1236,14 @@
                     <button
                       type="button"
                       onclick={() => onUpdateSetting("customPresetFile", null)}
-                      class="rounded-md border border-[#E5E3DD] bg-white px-2 py-1 text-[11px] text-[#6B6A65] hover:text-[#111111]"
+                      class="rounded-md border border-[#E6E0D6] bg-white px-2 py-1 text-[11px] text-[#70645D] hover:text-[#1A1513]"
                     >
                       Clear
                     </button>
                   {/if}
                 </div>
               </div>
-              <p class="truncate font-mono text-[11px] text-[#52524E]">
+              <p class="truncate font-mono text-[11px] text-[#544943]">
                 {settings.customPresetFile ?? "None (using Quality Matrix above)"}
               </p>
             </div>
@@ -1250,7 +1255,7 @@
               <div class="space-y-1.5">
                 <label
                   for="setting-naming-convention"
-                  class="block text-xs font-semibold text-[#111111]"
+                  class="block text-xs font-semibold text-[#1A1513]"
                 >
                   Naming Convention
                 </label>
@@ -1258,7 +1263,7 @@
                   id="setting-naming-convention"
                   value={settings.namingConvention}
                   onchange={handleNamingChange}
-                  class="w-full rounded-lg border border-[#E5E3DD] bg-[#F8F7F4] px-3 py-2 text-xs text-[#111111] outline-none focus:border-[#111111] focus:bg-white"
+                  class="w-full rounded-lg border border-[#E6E0D6] bg-[#FAF8F4] px-3 py-2 text-xs text-[#1A1513] outline-none focus:border-[#1A1513] focus:bg-white"
                 >
                   <option value="plex">Plex {"{imdb-...} / {tvdb-...}"}</option>
                   <option value="jellyfin">Jellyfin [imdbid-... / tvdbid-...]</option>
@@ -1269,7 +1274,7 @@
               <div class="space-y-1.5">
                 <label
                   for="setting-metadata-provider"
-                  class="block text-xs font-semibold text-[#111111]"
+                  class="block text-xs font-semibold text-[#1A1513]"
                 >
                   Default Lookup Provider
                 </label>
@@ -1277,7 +1282,7 @@
                   id="setting-metadata-provider"
                   value={settings.defaultMetadataProvider}
                   onchange={handleProviderChange}
-                  class="w-full rounded-lg border border-[#E5E3DD] bg-[#F8F7F4] px-3 py-2 text-xs text-[#111111] outline-none focus:border-[#111111] focus:bg-white"
+                  class="w-full rounded-lg border border-[#E6E0D6] bg-[#FAF8F4] px-3 py-2 text-xs text-[#1A1513] outline-none focus:border-[#1A1513] focus:bg-white"
                 >
                   <option value="imdb">IMDb (OMDb API)</option>
                   <option value="tvdb">TVDB v4</option>
@@ -1290,7 +1295,7 @@
             <div class="space-y-1.5">
                 <label
                   for="setting-tv-folder-org"
-                  class="block text-xs font-semibold text-[#111111]"
+                  class="block text-xs font-semibold text-[#1A1513]"
                 >
                   Batch Output Folder Organization
                 </label>
@@ -1298,39 +1303,39 @@
                   id="setting-tv-folder-org"
                   value={settings.tvFolderOrganization}
                   onchange={handleFolderOrgChange}
-                  class="w-full rounded-lg border border-[#E5E3DD] bg-[#F8F7F4] px-3 py-2 text-xs text-[#111111] outline-none focus:border-[#111111] focus:bg-white"
+                  class="w-full rounded-lg border border-[#E6E0D6] bg-[#FAF8F4] px-3 py-2 text-xs text-[#1A1513] outline-none focus:border-[#1A1513] focus:bg-white"
                 >
                   <option value="ask">Ask before encoding batches (Recommended)</option>
                   <option value="showAndSeason">Create Movie / Show &amp; Season XX folders</option>
                   <option value="seasonOnly">Create Season XX folders directly in Output dir</option>
                   <option value="flat">Keep flat (no extra subfolders)</option>
                 </select>
-                <p class="text-[11px] text-[#6B6A65]">
+                <p class="text-[11px] text-[#70645D]">
                   Controls whether Movie and multi-season TV batches automatically create organized folders as they encode.
                 </p>
             </div>
 
-            <div class="space-y-3 rounded-xl border border-[#E5E3DD] bg-[#FAF9F6] p-3.5">
+            <div class="space-y-3 rounded-xl border border-[#E6E0D6] bg-[#F7F4EE] p-3.5">
               <div class="flex items-center justify-between">
                 <div>
-                  <div class="text-xs font-semibold text-[#111111]">
+                  <div class="text-xs font-semibold text-[#1A1513]">
                     Metadata API Keys
                   </div>
-                  <div class="text-[11px] text-[#6B6A65]">
+                  <div class="text-[11px] text-[#70645D]">
                     Stored locally for online IMDb / TVDB / TMDB searches.
                   </div>
                 </div>
                 <button
                   type="button"
                   onclick={() => (showApiKeys = !showApiKeys)}
-                  class="rounded border border-[#E5E3DD] bg-white px-2 py-1 text-[10px] font-semibold text-[#52524E] hover:text-[#111111]"
+                  class="rounded border border-[#E6E0D6] bg-white px-2 py-1 text-[10px] font-semibold text-[#544943] hover:text-[#1A1513]"
                 >
                   {showApiKeys ? "Hide" : "Show"}
                 </button>
               </div>
 
               <div class="space-y-1">
-                <label for="setting-omdb-key" class="block text-[11px] font-medium text-[#52524E]">
+                <label for="setting-omdb-key" class="block text-[11px] font-medium text-[#544943]">
                   OMDb API Key (IMDb)
                 </label>
                 <input
@@ -1343,12 +1348,12 @@
                       "omdbApiKey",
                       e.currentTarget.value.trim() || null,
                     )}
-                  class="w-full rounded-lg border border-[#E5E3DD] bg-white px-2.5 py-1.5 font-mono text-xs text-[#111111] placeholder:text-[#A4A29B] outline-none focus:border-[#111111]"
+                  class="w-full rounded-lg border border-[#E6E0D6] bg-white px-2.5 py-1.5 font-mono text-xs text-[#1A1513] placeholder:text-[#A89C95] outline-none focus:border-[#1A1513]"
                 />
               </div>
 
               <div class="space-y-1">
-                <label for="setting-tvdb-key" class="block text-[11px] font-medium text-[#52524E]">
+                <label for="setting-tvdb-key" class="block text-[11px] font-medium text-[#544943]">
                   TVDB API Key
                 </label>
                 <input
@@ -1361,12 +1366,12 @@
                       "tvdbApiKey",
                       e.currentTarget.value.trim() || null,
                     )}
-                  class="w-full rounded-lg border border-[#E5E3DD] bg-white px-2.5 py-1.5 font-mono text-xs text-[#111111] placeholder:text-[#A4A29B] outline-none focus:border-[#111111]"
+                  class="w-full rounded-lg border border-[#E6E0D6] bg-white px-2.5 py-1.5 font-mono text-xs text-[#1A1513] placeholder:text-[#A89C95] outline-none focus:border-[#1A1513]"
                 />
               </div>
 
               <div class="space-y-1">
-                <label for="setting-tmdb-key" class="block text-[11px] font-medium text-[#52524E]">
+                <label for="setting-tmdb-key" class="block text-[11px] font-medium text-[#544943]">
                   TMDB API Key / Read Access Token
                 </label>
                 <input
@@ -1379,13 +1384,14 @@
                       "tmdbApiKey",
                       e.currentTarget.value.trim() || null,
                     )}
-                  class="w-full rounded-lg border border-[#E5E3DD] bg-white px-2.5 py-1.5 font-mono text-xs text-[#111111] placeholder:text-[#A4A29B] outline-none focus:border-[#111111]"
+                  class="w-full rounded-lg border border-[#E6E0D6] bg-white px-2.5 py-1.5 font-mono text-xs text-[#1A1513] placeholder:text-[#A89C95] outline-none focus:border-[#1A1513]"
                 />
               </div>
             </div>
           </div>
         {/if}
       </div>
+    </div>
     </div>
   </div>
 {/if}

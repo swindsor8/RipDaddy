@@ -101,7 +101,7 @@
     role="dialog"
     aria-modal="true"
     aria-label={`Fullscreen frame preview: ${fileName}`}
-    class="fixed inset-0 z-[60] flex flex-col bg-[#0B0B0B]/95 text-white backdrop-blur-sm"
+    class="fixed inset-0 z-[60] flex flex-col bg-[#120E0D]/95 text-white backdrop-blur-sm"
   >
     <!-- Top HUD -->
     <header
@@ -122,7 +122,7 @@
 
         {#if preview.mediaInfo.displayAspectRatio}
           <span
-            class="rounded-full border border-[#58B0F9]/40 bg-[#58B0F9]/15 px-2 py-0.5 font-mono text-[11px] font-semibold text-[#8CCBFF]"
+            class="rounded-full border border-[#5BC0EB]/40 bg-[#5BC0EB]/15 px-2 py-0.5 font-mono text-[11px] font-semibold text-[#82D6FA]"
           >
             {preview.mediaInfo.displayAspectRatio}
           </span>
@@ -130,7 +130,7 @@
 
         {#if preview.mediaInfo.videoCodec}
           <span
-            class="rounded-full border border-[#3AD27E]/40 bg-[#3AD27E]/15 px-2 py-0.5 font-mono text-[11px] font-semibold text-[#7CE8AB]"
+            class="rounded-full border border-[#4CDE99]/40 bg-[#4CDE99]/15 px-2 py-0.5 font-mono text-[11px] font-semibold text-[#7AF0B8]"
           >
             {preview.mediaInfo.videoCodec}
           </span>
@@ -148,7 +148,7 @@
           title="Toggle Fit vs 1:1 Actual Pixels (Z)"
           class={`rounded-md border px-2.5 py-1 text-xs font-semibold transition ${
             zoomActual
-              ? "border-[#1D8BF8] bg-[#1D8BF8] text-white"
+              ? "border-[#11824F] bg-[#11824F] text-white"
               : "border-white/15 bg-white/10 text-white/90 hover:bg-white/20"
           }`}
         >
@@ -220,9 +220,9 @@
           <button
             type="button"
             onclick={() => onSelectIndex(idx)}
-            class={`group relative w-28 shrink-0 overflow-hidden rounded-md border-2 bg-[#161615] transition ${
+            class={`group relative w-28 shrink-0 overflow-hidden rounded-md border-2 bg-[#1E1816] transition ${
               idx === activeIndex
-                ? "border-[#1D8BF8] ring-2 ring-[#1D8BF8]/40"
+                ? "border-[#11824F] ring-2 ring-[#11824F]/40"
                 : "border-white/15 opacity-70 hover:border-white/50 hover:opacity-100"
             }`}
           >

@@ -117,12 +117,16 @@
       role="dialog"
       aria-modal="true"
       aria-label="Organize output folders"
-      class="flex w-full max-w-[610px] flex-col overflow-hidden rounded-2xl border border-[#DFDDD6] bg-white shadow-[0_28px_70px_rgba(17,17,17,0.18)]"
+      class="flex w-full max-w-[610px] flex-col overflow-hidden rounded-2xl border border-[#DAD3C7] bg-white shadow-[0_28px_70px_rgba(26,21,19,0.18)]"
     >
+      <div
+        class="h-[3px] w-full shrink-0 bg-gradient-to-r from-[#4CDE99] via-[#F8B142] to-[#FA637C]"
+        aria-hidden="true"
+      ></div>
       <!-- Header -->
-      <header class="border-b border-[#E5E3DD] bg-[#F8F7F4] px-6 py-4">
+      <header class="border-b border-[#E6E0D6] bg-[#FAF8F4] px-6 py-4">
         <div class="flex items-center justify-between gap-2">
-          <h2 class="text-sm font-extrabold tracking-[-0.02em] text-[#111111]">
+          <h2 class="text-sm font-extrabold tracking-[-0.02em] text-[#1A1513]">
             {#if batchKind === "movies"}
               Organize movies into individual folders?
             {:else if batchKind === "mixed"}
@@ -134,19 +138,19 @@
 
           {#if batchKind === "movies"}
             <span
-              class="rounded-full border border-[#24B465] bg-[#E3F9EC] px-2.5 py-0.5 font-mono text-[10px] font-bold text-[#17462B]"
+              class="rounded-full border border-[#1FA868] bg-[#E6FBF1] px-2.5 py-0.5 font-mono text-[10px] font-bold text-[#0E4D31]"
             >
               {selectedFileCount} Movie{selectedFileCount === 1 ? "" : "s"}
             </span>
           {:else if batchKind === "mixed"}
             <span
-              class="rounded-full border border-[#DDA12D] bg-[#FEF7E4] px-2.5 py-0.5 font-mono text-[10px] font-bold text-[#5C4107]"
+              class="rounded-full border border-[#D68D1C] bg-[#FFF7E6] px-2.5 py-0.5 font-mono text-[10px] font-bold text-[#5E3906]"
             >
               Mixed Movies + TV
             </span>
           {:else if detectedSeasons.length > 1}
             <span
-              class="rounded-full border border-[#3894E2] bg-[#DCEEFF] px-2.5 py-0.5 font-mono text-[10px] font-bold text-[#155CA2]"
+              class="rounded-full border border-[#1C8EC0] bg-[#E6F6FD] px-2.5 py-0.5 font-mono text-[10px] font-bold text-[#0E5678]"
             >
               {detectedSeasons.length} Seasons ({detectedSeasons
                 .map((s) => `S${String(s).padStart(2, "0")}`)
@@ -154,25 +158,25 @@
             </span>
           {:else if detectedSeasons.length === 1}
             <span
-              class="rounded-full border border-[#E5E3DD] bg-white px-2 py-0.5 font-mono text-[10px] font-semibold text-[#5C5B57]"
+              class="rounded-full border border-[#E6E0D6] bg-white px-2 py-0.5 font-mono text-[10px] font-semibold text-[#61554F]"
             >
               Season {String(detectedSeasons[0]).padStart(2, "0")}
             </span>
           {/if}
         </div>
-        <p class="mt-1 text-xs leading-relaxed text-[#5C5B57]">
+        <p class="mt-1 text-xs leading-relaxed text-[#61554F]">
           {#if batchKind === "movies"}
             Choose whether each encoded movie gets its own Plex/Jellyfin folder
-            (<span class="font-mono text-[#111111]">Movie (Year)/Movie (Year).ext</span>)
+            (<span class="font-mono text-[#1A1513]">Movie (Year)/Movie (Year).ext</span>)
             or writes flat into your output folder.
           {:else if batchKind === "mixed"}
             Both movies and TV episodes are queued. Choose whether RipDaddy should
-            automatically create movie folders and <span class="font-mono text-[#111111]">Season XX</span>
+            automatically create movie folders and <span class="font-mono text-[#1A1513]">Season XX</span>
             subfolders as it encodes, or write everything flat.
           {:else if detectedSeasons.length > 1}
-            Multiple seasons of <span class="font-semibold text-[#111111]">{showTitle || "this show"}</span>
+            Multiple seasons of <span class="font-semibold text-[#1A1513]">{showTitle || "this show"}</span>
             are queued together. Choose whether RipDaddy should automatically
-            create <span class="font-mono text-[#111111]">Season XX</span> folders
+            create <span class="font-mono text-[#1A1513]">Season XX</span> folders
             as each episode encodes, or keep files flat.
           {:else}
             Choose how RipDaddy should place the {selectedFileCount} encoded
@@ -185,13 +189,13 @@
       <div class="space-y-3.5 p-6">
         <!-- Output Directory Picker Strip -->
         <div
-          class="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[#E5E3DD] bg-[#FAF9F6] px-3 py-2 text-[11px]"
+          class="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[#E6E0D6] bg-[#F7F4EE] px-3 py-2 text-[11px]"
         >
           <div class="min-w-0 flex-1">
-            <span class="font-bold uppercase tracking-[0.06em] text-[#787772]">
+            <span class="font-bold uppercase tracking-[0.06em] text-[#7D716A]">
               Output Folder:
             </span>
-            <p class="truncate font-mono text-[#111111]" title={outputDir}>
+            <p class="truncate font-mono text-[#1A1513]" title={outputDir}>
               {outputDir}
             </p>
           </div>
@@ -204,7 +208,7 @@
                   selectedOrg = batchKind === "tvSeries" ? "seasonOnly" : "showAndSeason";
                 }}
                 title={`Output directly inside ${sourceFolderPath}`}
-                class="rounded border border-[#B5DAFA] bg-[#DCEEFF] px-2 py-1 text-[10px] font-semibold text-[#155CA2] hover:bg-[#CBE5FE]"
+                class="rounded border border-[#9CD9F5] bg-[#E6F6FD] px-2 py-1 text-[10px] font-semibold text-[#0E5678] hover:bg-[#D1EFFB]"
               >
                 Use "{folderBaseName(sourceFolderPath)}"
               </button>
@@ -212,7 +216,7 @@
             <button
               type="button"
               onclick={onBrowseOutputDir}
-              class="rounded border border-[#DFDDD6] bg-white px-2 py-1 text-[10px] font-semibold text-[#111111] hover:bg-[#F2F0EA]"
+              class="rounded border border-[#DAD3C7] bg-white px-2 py-1 text-[10px] font-semibold text-[#1A1513] hover:bg-[#F2EDE5]"
             >
               Change...
             </button>
@@ -227,8 +231,8 @@
             onclick={() => (selectedOrg = "showAndSeason")}
             class={`w-full rounded-xl border p-3.5 text-left transition ${
               selectedOrg === "showAndSeason"
-                ? "border-[#1D8BF8] bg-[#F0F7FF] ring-1 ring-[#1D8BF8]"
-                : "border-[#E5E3DD] bg-white hover:border-[#C8C5BC]"
+                ? "border-[#11824F] bg-[#EEFCF5] ring-1 ring-[#11824F]"
+                : "border-[#E6E0D6] bg-white hover:border-[#C4BCB0]"
             }`}
           >
             <div class="flex items-center justify-between gap-2">
@@ -236,15 +240,15 @@
                 <span
                   class={`flex h-4 w-4 items-center justify-center rounded-full border ${
                     selectedOrg === "showAndSeason"
-                      ? "border-[#1D8BF8] bg-[#1D8BF8]"
-                      : "border-[#C8C5BC] bg-white"
+                      ? "border-[#11824F] bg-[#11824F]"
+                      : "border-[#C4BCB0] bg-white"
                   }`}
                 >
                   {#if selectedOrg === "showAndSeason"}
                     <span class="h-1.5 w-1.5 rounded-full bg-white"></span>
                   {/if}
                 </span>
-                <span class="text-xs font-bold text-[#111111]">
+                <span class="text-xs font-bold text-[#1A1513]">
                   {#if batchKind === "movies"}
                     Create a folder for each Movie
                   {:else if batchKind === "mixed"}
@@ -256,13 +260,13 @@
               </div>
               {#if recommendedOrg === "showAndSeason"}
                 <span
-                  class="rounded-full border border-[#24B465] bg-[#E3F9EC] px-2 py-0.5 text-[9px] font-bold uppercase text-[#17462B]"
+                  class="rounded-full border border-[#1FA868] bg-[#E6FBF1] px-2 py-0.5 text-[9px] font-bold uppercase text-[#0E4D31]"
                 >
                   Recommended
                 </span>
               {/if}
             </div>
-            <p class="mt-1 pl-6 text-[11px] text-[#6B6A65]">
+            <p class="mt-1 pl-6 text-[11px] text-[#70645D]">
               {#if batchKind === "movies"}
                 Plex &amp; Jellyfin standard — each movie gets its own clean subfolder.
               {:else}
@@ -270,7 +274,7 @@
               {/if}
             </p>
             <div
-              class="mt-2 ml-6 space-y-0.5 rounded-md border border-[#E5E3DD] bg-white px-2.5 py-1.5 font-mono text-[10px] text-[#3F3E3B]"
+              class="mt-2 ml-6 space-y-0.5 rounded-md border border-[#E6E0D6] bg-white px-2.5 py-1.5 font-mono text-[10px] text-[#3F3530]"
             >
               {#each sampleItems as sample, idx (`full-${sample.kind}-${sample.title}-${sample.season ?? 0}-${sample.episode ?? idx}`)}
                 <p class="truncate">{formatSamplePath(sample, "showAndSeason")}</p>
@@ -285,8 +289,8 @@
               onclick={() => (selectedOrg = "seasonOnly")}
               class={`w-full rounded-xl border p-3.5 text-left transition ${
                 selectedOrg === "seasonOnly"
-                  ? "border-[#1D8BF8] bg-[#F0F7FF] ring-1 ring-[#1D8BF8]"
-                  : "border-[#E5E3DD] bg-white hover:border-[#C8C5BC]"
+                  ? "border-[#11824F] bg-[#EEFCF5] ring-1 ring-[#11824F]"
+                  : "border-[#E6E0D6] bg-white hover:border-[#C4BCB0]"
               }`}
             >
               <div class="flex items-center justify-between gap-2">
@@ -294,31 +298,31 @@
                   <span
                     class={`flex h-4 w-4 items-center justify-center rounded-full border ${
                       selectedOrg === "seasonOnly"
-                        ? "border-[#1D8BF8] bg-[#1D8BF8]"
-                        : "border-[#C8C5BC] bg-white"
+                        ? "border-[#11824F] bg-[#11824F]"
+                        : "border-[#C4BCB0] bg-white"
                     }`}
                   >
                     {#if selectedOrg === "seasonOnly"}
                       <span class="h-1.5 w-1.5 rounded-full bg-white"></span>
                     {/if}
                   </span>
-                  <span class="text-xs font-bold text-[#111111]">
+                  <span class="text-xs font-bold text-[#1A1513]">
                     Create Season folders directly inside Output folder
                   </span>
                 </div>
                 {#if recommendedOrg === "seasonOnly"}
                   <span
-                    class="rounded-full border border-[#24B465] bg-[#E3F9EC] px-2 py-0.5 text-[9px] font-bold uppercase text-[#17462B]"
+                    class="rounded-full border border-[#1FA868] bg-[#E6FBF1] px-2 py-0.5 text-[9px] font-bold uppercase text-[#0E4D31]"
                   >
                     Recommended
                   </span>
                 {/if}
               </div>
-              <p class="mt-1 pl-6 text-[11px] text-[#6B6A65]">
+              <p class="mt-1 pl-6 text-[11px] text-[#70645D]">
                 Ideal when your output folder is already named "{showTitle || "the show"}" — avoids nesting the show name twice.
               </p>
               <div
-                class="mt-2 ml-6 space-y-0.5 rounded-md border border-[#E5E3DD] bg-white px-2.5 py-1.5 font-mono text-[10px] text-[#3F3E3B]"
+                class="mt-2 ml-6 space-y-0.5 rounded-md border border-[#E6E0D6] bg-white px-2.5 py-1.5 font-mono text-[10px] text-[#3F3530]"
               >
                 {#each sampleItems as sample, idx (`season-${sample.kind}-${sample.title}-${sample.season ?? 0}-${sample.episode ?? idx}`)}
                   <p class="truncate">{formatSamplePath(sample, "seasonOnly")}</p>
@@ -333,8 +337,8 @@
             onclick={() => (selectedOrg = "flat")}
             class={`w-full rounded-xl border p-3.5 text-left transition ${
               selectedOrg === "flat"
-                ? "border-[#1D8BF8] bg-[#F0F7FF] ring-1 ring-[#1D8BF8]"
-                : "border-[#E5E3DD] bg-white hover:border-[#C8C5BC]"
+                ? "border-[#11824F] bg-[#EEFCF5] ring-1 ring-[#11824F]"
+                : "border-[#E6E0D6] bg-white hover:border-[#C4BCB0]"
             }`}
           >
             <div class="flex items-center justify-between gap-2">
@@ -342,31 +346,31 @@
                 <span
                   class={`flex h-4 w-4 items-center justify-center rounded-full border ${
                     selectedOrg === "flat"
-                      ? "border-[#1D8BF8] bg-[#1D8BF8]"
-                      : "border-[#C8C5BC] bg-white"
+                      ? "border-[#11824F] bg-[#11824F]"
+                      : "border-[#C4BCB0] bg-white"
                   }`}
                 >
                   {#if selectedOrg === "flat"}
                     <span class="h-1.5 w-1.5 rounded-full bg-white"></span>
                   {/if}
                 </span>
-                <span class="text-xs font-bold text-[#111111]">
+                <span class="text-xs font-bold text-[#1A1513]">
                   Keep flat (no extra subfolders)
                 </span>
               </div>
               {#if recommendedOrg === "flat"}
                 <span
-                  class="rounded-full border border-[#24B465] bg-[#E3F9EC] px-2 py-0.5 text-[9px] font-bold uppercase text-[#17462B]"
+                  class="rounded-full border border-[#1FA868] bg-[#E6FBF1] px-2 py-0.5 text-[9px] font-bold uppercase text-[#0E4D31]"
                 >
                   Recommended
                 </span>
               {/if}
             </div>
-            <p class="mt-1 pl-6 text-[11px] text-[#6B6A65]">
+            <p class="mt-1 pl-6 text-[11px] text-[#70645D]">
               Writes every renamed file directly into your output directory without creating nested folders.
             </p>
             <div
-              class="mt-2 ml-6 space-y-0.5 rounded-md border border-[#E5E3DD] bg-white px-2.5 py-1.5 font-mono text-[10px] text-[#3F3E3B]"
+              class="mt-2 ml-6 space-y-0.5 rounded-md border border-[#E6E0D6] bg-white px-2.5 py-1.5 font-mono text-[10px] text-[#3F3530]"
             >
               {#each sampleItems as sample, idx (`flat-${sample.kind}-${sample.title}-${sample.season ?? 0}-${sample.episode ?? idx}`)}
                 <p class="truncate">{formatSamplePath(sample, "flat")}</p>
@@ -377,13 +381,13 @@
 
         <label
           for="remember-folder-org"
-          class="flex cursor-pointer items-center gap-2 pt-1 text-xs text-[#5C5B57]"
+          class="flex cursor-pointer items-center gap-2 pt-1 text-xs text-[#61554F]"
         >
           <input
             id="remember-folder-org"
             type="checkbox"
             bind:checked={saveAsDefault}
-            class="h-3.5 w-3.5 accent-[#111111]"
+            class="h-3.5 w-3.5 accent-[#1A1513]"
           />
           <span>
             Remember this choice and don't ask again (changeable anytime in Settings → Metadata &amp; Naming)
@@ -393,12 +397,12 @@
 
       <!-- Footer -->
       <footer
-        class="flex items-center justify-between gap-3 border-t border-[#E5E3DD] bg-[#F8F7F4] px-6 py-3.5"
+        class="flex items-center justify-between gap-3 border-t border-[#E6E0D6] bg-[#FAF8F4] px-6 py-3.5"
       >
         <button
           type="button"
           onclick={onCancel}
-          class="rounded-md border border-[#DFDDD6] bg-white px-3 py-1.5 text-xs font-semibold text-[#5C5B57] hover:bg-[#EFECE6] hover:text-[#111111]"
+          class="rounded-md border border-[#DAD3C7] bg-white px-3 py-1.5 text-xs font-semibold text-[#61554F] hover:bg-[#EDE7DD] hover:text-[#1A1513]"
         >
           Cancel
         </button>
@@ -406,7 +410,7 @@
         <button
           type="button"
           onclick={() => onConfirm(selectedOrg, saveAsDefault)}
-          class="rounded-md bg-[#111111] px-4 py-2 text-xs font-semibold text-white transition hover:bg-[#2A2A2A]"
+          class="rounded-md bg-[#11824F] px-4 py-2 text-xs font-semibold text-white shadow-[0_1px_2px_rgba(17,130,79,0.22)] transition hover:bg-[#0D6E42]"
         >
           Encode {selectedFileCount} {batchKind === "movies" ? (selectedFileCount === 1 ? "Movie" : "Movies") : (selectedFileCount === 1 ? "File" : "Files")} →
         </button>

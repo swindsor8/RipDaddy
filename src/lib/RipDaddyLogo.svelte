@@ -14,5 +14,5 @@
   {alt}
   draggable="false"
   decoding="async"
-  class={`shrink-0 select-none object-contain drop-shadow-[0_1px_1.5px_rgba(17,17,17,0.14)] ${className}`}
+  class={`shrink-0 select-none object-contain drop-shadow-[0_1px_1.5px_rgba(26,21,19,0.16)] ${className}`}
 />

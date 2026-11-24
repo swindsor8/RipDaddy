@@ -2056,13 +2056,13 @@
   function trackPillClass(track: StreamTrack): string {
     switch (track.trackType) {
       case "video":
-        return "border-[#B5DAFA] bg-[#DCEEFF] text-[#155CA2]";
+        return "border-[#9CD9F5] bg-[#E6F6FD] text-[#0E5678]";
       case "audio":
-        return "border-[#B3E8CB] bg-[#E3F9EC] text-[#17462B]";
+        return "border-[#9BE5C1] bg-[#E6FBF1] text-[#0E4D31]";
       case "subtitle":
-        return "border-[#F1D89F] bg-[#FDF4DE] text-[#533B0B]";
+        return "border-[#F0CB82] bg-[#FDF3DC] text-[#563406]";
       case "unknown":
-        return "border-[#E5E3DD] bg-[#F8F7F4] text-[#5C5B57]";
+        return "border-[#E6E0D6] bg-[#FAF8F4] text-[#61554F]";
     }
   }
 
@@ -2110,20 +2110,26 @@
   });
 </script>
 
-<div class="flex h-screen w-screen flex-col overflow-hidden bg-[#F8F7F4] text-[#111111]">
-  <!-- Row 1: Single Lean Clay App Bar -->
+<div class="flex h-screen w-screen flex-col overflow-hidden bg-[#FAF8F4] text-[#1A1513]">
+  <!-- RipDaddy Mascot Brand Ribbon (Mint Tile -> Cap Gold -> Coral Shirt) -->
+  <div
+    class="h-[3px] w-full shrink-0 bg-gradient-to-r from-[#4CDE99] via-[#F8B142] to-[#FA637C]"
+    aria-hidden="true"
+  ></div>
+
+  <!-- Row 1: Single Lean RipDaddy App Bar -->
   <header
-    class="flex h-12 shrink-0 items-center justify-between gap-4 border-b border-[#E5E3DD] bg-white px-5"
+    class="flex h-12 shrink-0 items-center justify-between gap-4 border-b border-[#E6E0D6] bg-white px-5"
   >
     <!-- Brand -->
     <div class="flex items-center gap-2.5">
       <RipDaddyLogo class="h-8 w-8" alt="" />
-      <span class="text-[16px] font-extrabold tracking-[-0.03em] text-[#111111]">
-        RipDaddy
+      <span class="text-[16px] font-extrabold tracking-[-0.03em] text-[#1A1513]">
+        Rip<span class="text-[#11824F]">Daddy</span>
       </span>
     </div>
 
-    <!-- Center: Clay Colored Workflow Mode Pills -->
+    <!-- Center: RipDaddy Mascot Workflow Mode Pills -->
     <div
       class="flex items-center gap-1.5"
       role="group"
@@ -2134,8 +2140,8 @@
         onclick={() => (workflowMode = "ripOnly")}
         class={`rounded-full border px-3 py-1 text-xs font-semibold transition ${
           workflowMode === "ripOnly"
-            ? "border-[#D84CB2] bg-[#FF6AD5] text-[#111111] shadow-[0_1px_2px_rgba(0,0,0,0.08)]"
-            : "border-[#F1B6E2] bg-[#FFE8F8] text-[#4A2040] hover:bg-[#FFD6F3]"
+            ? "border-[#D9415D] bg-[#FA637C] text-[#1A1513] shadow-[0_1px_2px_rgba(0,0,0,0.08)]"
+            : "border-[#F8B4C0] bg-[#FFF0F2] text-[#751A2E] hover:bg-[#FFE0E5]"
         }`}
       >
         Rip Only
@@ -2146,8 +2152,8 @@
         onclick={() => (workflowMode = "ripAndEncode")}
         class={`rounded-full border px-3 py-1 text-xs font-semibold transition ${
           workflowMode === "ripAndEncode"
-            ? "border-[#24B465] bg-[#3AD27E] text-[#111111] shadow-[0_1px_2px_rgba(0,0,0,0.08)]"
-            : "border-[#B3E8CB] bg-[#E3F9EC] text-[#17462B] hover:bg-[#CEF5DF]"
+            ? "border-[#1FA868] bg-[#4CDE99] text-[#1A1513] shadow-[0_1px_2px_rgba(0,0,0,0.08)]"
+            : "border-[#9BE5C1] bg-[#E6FBF1] text-[#0E4D31] hover:bg-[#CEF6E3]"
         }`}
       >
         Rip + Encode
@@ -2158,8 +2164,8 @@
         onclick={() => (workflowMode = "encodeOnly")}
         class={`rounded-full border px-3 py-1 text-xs font-semibold transition ${
           workflowMode === "encodeOnly"
-            ? "border-[#DDA12D] bg-[#F6BE4F] text-[#111111] shadow-[0_1px_2px_rgba(0,0,0,0.08)]"
-            : "border-[#F1D89F] bg-[#FDF4DE] text-[#533B0B] hover:bg-[#FBEAC2]"
+            ? "border-[#D68D1C] bg-[#F8B142] text-[#1A1513] shadow-[0_1px_2px_rgba(0,0,0,0.08)]"
+            : "border-[#F0CB82] bg-[#FDF3DC] text-[#563406] hover:bg-[#FBE4B4]"
         }`}
       >
         Encode Only
@@ -2174,8 +2180,8 @@
         aria-pressed={previewOpen}
         class={`flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-xs font-semibold transition ${
           previewOpen
-            ? "border-[#3894E2] bg-[#DCEEFF] text-[#155CA2]"
-            : "border-[#E5E3DD] bg-[#F8F7F4] text-[#52524E] hover:text-[#111111]"
+            ? "border-[#1C8EC0] bg-[#E6F6FD] text-[#0E5678]"
+            : "border-[#E6E0D6] bg-[#FAF8F4] text-[#544943] hover:text-[#1A1513]"
         }`}
       >
         <svg
@@ -2202,19 +2208,19 @@
         aria-haspopup="dialog"
         class={`flex items-center gap-2 rounded-md border px-2.5 py-1.5 text-xs font-semibold transition ${
           settingsOpen
-            ? "border-[#111111] bg-[#111111] text-white"
-            : "border-[#DFDDD6] bg-white text-[#111111] hover:bg-[#F8F7F4]"
+            ? "border-[#1A1513] bg-[#1A1513] text-white"
+            : "border-[#DAD3C7] bg-white text-[#1A1513] hover:bg-[#FAF8F4]"
         }`}
       >
         <span
           class={`h-2 w-2 rounded-full ${
             checkingBinaries || installingBinary !== null
-              ? "bg-[#B8B6AF]"
+              ? "bg-[#B6AEA2]"
               : missingCliCount === 0
-                ? "bg-[#3AD27E]"
+                ? "bg-[#4CDE99]"
                 : modeReady
-                  ? "bg-[#58B0F9]"
-                  : "bg-[#F6BE4F]"
+                  ? "bg-[#5BC0EB]"
+                  : "bg-[#F8B142]"
           }`}
         ></span>
         <span>Settings</span>
@@ -2225,14 +2231,14 @@
 
   <!-- Row 2: Compact Source, Preset & Primary Action Toolbar -->
   <div
-    class="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-[#E5E3DD] bg-[#F8F7F4] px-5 py-2"
+    class="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-[#E6E0D6] bg-[#FAF8F4] px-5 py-2"
   >
     <div class="flex flex-wrap items-center gap-3">
       {#if requiresMakeMkv}
         <div class="flex items-center gap-2">
           <label
             for="drive-select"
-            class="text-[11px] font-semibold text-[#5C5B57]"
+            class="text-[11px] font-semibold text-[#61554F]"
           >
             Drive
           </label>
@@ -2245,7 +2251,7 @@
               }
             }}
             disabled={!modeReady || drives.length === 0 || scanningDisc}
-            class="rounded-md border border-[#DFDDD6] bg-white px-2.5 py-1 text-xs font-medium text-[#111111] outline-none focus:border-[#111111] disabled:cursor-not-allowed disabled:bg-[#F2F0EA] disabled:text-[#8E8C85]"
+            class="rounded-md border border-[#DAD3C7] bg-white px-2.5 py-1 text-xs font-medium text-[#1A1513] outline-none focus:border-[#1A1513] disabled:cursor-not-allowed disabled:bg-[#F2EDE5] disabled:text-[#92867F]"
           >
             {#if drives.length === 0}
               <option value={null}>No drives scanned</option>
@@ -2265,7 +2271,7 @@
             title={modeReady
               ? "Scan connected optical drives and disc titles via makemkvcon"
               : "Configure makemkvcon in Settings"}
-            class="rounded-md border border-[#DFDDD6] bg-white px-2.5 py-1 text-xs font-semibold text-[#111111] transition hover:bg-[#EFECE6] disabled:cursor-not-allowed disabled:opacity-50"
+            class="rounded-md border border-[#DAD3C7] bg-white px-2.5 py-1 text-xs font-semibold text-[#1A1513] transition hover:bg-[#EDE7DD] disabled:cursor-not-allowed disabled:opacity-50"
           >
             {scanningDrives || scanningDisc ? "Scanning..." : "Scan"}
           </button>
@@ -2277,7 +2283,7 @@
             onclick={() => void pickLocalVideoFolder()}
             disabled={!modeReady || identifyingFolder}
             title="Pick a TV season or video folder to auto-identify show + episodes and batch encode"
-            class="rounded-md bg-[#1D8BF8] px-3 py-1 text-xs font-semibold text-white transition hover:bg-[#137CE5] disabled:cursor-not-allowed disabled:bg-[#D8D6CF] disabled:text-[#787772]"
+            class="rounded-md bg-[#11824F] px-3 py-1 text-xs font-semibold text-white transition hover:bg-[#0D6E42] disabled:cursor-not-allowed disabled:bg-[#D6CFC3] disabled:text-[#7D716A]"
           >
             {identifyingFolder ? "Identifying..." : "+ Add Folder"}
           </button>
@@ -2285,7 +2291,7 @@
             type="button"
             onclick={() => void pickLocalVideoFiles()}
             disabled={!modeReady || identifyingFolder}
-            class="rounded-md border border-[#DFDDD6] bg-white px-2.5 py-1 text-xs font-semibold text-[#111111] transition hover:bg-[#EFECE6] disabled:cursor-not-allowed disabled:opacity-50"
+            class="rounded-md border border-[#DAD3C7] bg-white px-2.5 py-1 text-xs font-semibold text-[#1A1513] transition hover:bg-[#EDE7DD] disabled:cursor-not-allowed disabled:opacity-50"
           >
             + Add Files
           </button>
@@ -2295,7 +2301,7 @@
               onclick={() => void handleAutoIdentifyLoadedFiles()}
               disabled={identifyingFolder}
               title="Auto-identify show and episode numbers via TVDB, TMDB, or free TVMaze"
-              class="rounded-md border border-[#B5DAFA] bg-[#DCEEFF] px-2.5 py-1 text-xs font-semibold text-[#155CA2] transition hover:bg-[#CBE5FE] disabled:opacity-50"
+              class="rounded-md border border-[#9CD9F5] bg-[#E6F6FD] px-2.5 py-1 text-xs font-semibold text-[#0E5678] transition hover:bg-[#D1EFFB] disabled:opacity-50"
             >
               Auto-Identify
             </button>
@@ -2304,11 +2310,11 @@
       {/if}
 
       {#if requiresHandBrake}
-        <div class="h-4 w-px bg-[#E5E3DD]"></div>
+        <div class="h-4 w-px bg-[#E6E0D6]"></div>
         <div class="flex flex-wrap items-center gap-2">
           <!-- Local vs Remote Delivery Pill Toggle -->
           <div
-            class="inline-flex rounded-full border border-[#DFDDD6] bg-white p-0.5 text-[11px]"
+            class="inline-flex rounded-full border border-[#DAD3C7] bg-white p-0.5 text-[11px]"
             role="group"
             aria-label="Delivery target"
           >
@@ -2318,8 +2324,8 @@
                 selectQualityTier(settings.activeResolution, "local")}
               class={`rounded-full px-2.5 py-0.5 font-semibold transition ${
                 settings.activeDelivery === "local"
-                  ? "bg-[#3AD27E] text-[#111111]"
-                  : "text-[#6B6A65] hover:text-[#111111]"
+                  ? "bg-[#4CDE99] text-[#1A1513]"
+                  : "text-[#70645D] hover:text-[#1A1513]"
               }`}
             >
               Local
@@ -2330,8 +2336,8 @@
                 selectQualityTier(settings.activeResolution, "remote")}
               class={`rounded-full px-2.5 py-0.5 font-semibold transition ${
                 settings.activeDelivery === "remote"
-                  ? "bg-[#58B0F9] text-[#111111]"
-                  : "text-[#6B6A65] hover:text-[#111111]"
+                  ? "bg-[#5BC0EB] text-[#1A1513]"
+                  : "text-[#70645D] hover:text-[#1A1513]"
               }`}
             >
               Remote
@@ -2340,7 +2346,7 @@
 
           <!-- 480p / 720p / 1080p / 4K Resolution Selector -->
           <div
-            class="inline-flex rounded-md border border-[#DFDDD6] bg-white p-0.5 font-mono text-[11px]"
+            class="inline-flex rounded-md border border-[#DAD3C7] bg-white p-0.5 font-mono text-[11px]"
             role="group"
             aria-label="Target resolution"
           >
@@ -2351,8 +2357,8 @@
                   selectQualityTier(tier.id, settings.activeDelivery)}
                 class={`rounded px-2 py-0.5 font-semibold transition ${
                   settings.activeResolution === tier.id
-                    ? "bg-[#111111] text-white"
-                    : "text-[#52524E] hover:bg-[#F8F7F4] hover:text-[#111111]"
+                    ? "bg-[#1A1513] text-white"
+                    : "text-[#544943] hover:bg-[#FAF8F4] hover:text-[#1A1513]"
                 }`}
               >
                 {tier.shortLabel}
@@ -2366,7 +2372,7 @@
               type="button"
               onclick={() => openSettingsAt("encoding")}
               title="Customize this resolution/delivery profile in Settings"
-              class="rounded-md border border-[#DFDDD6] bg-white px-2 py-1 font-mono text-[10px] font-semibold text-[#52524E] transition hover:border-[#111111] hover:text-[#111111]"
+              class="rounded-md border border-[#DAD3C7] bg-white px-2 py-1 font-mono text-[10px] font-semibold text-[#544943] transition hover:border-[#1A1513] hover:text-[#1A1513]"
             >
               {shortEncoderLabel(activeQualityProfile.encoder)} · RF
               {activeQualityProfile.rfQuality.toFixed(0)} · .{outputContainer}
@@ -2375,16 +2381,16 @@
         </div>
       {/if}
 
-      <div class="h-4 w-px bg-[#E5E3DD]"></div>
+      <div class="h-4 w-px bg-[#E6E0D6]"></div>
 
       <button
         type="button"
         onclick={() => openSettingsAt("storage")}
-        class="flex max-w-[260px] items-center gap-1.5 rounded-md border border-transparent px-2 py-1 text-[11px] text-[#5C5B57] transition hover:border-[#E5E3DD] hover:bg-white hover:text-[#111111]"
+        class="flex max-w-[260px] items-center gap-1.5 rounded-md border border-transparent px-2 py-1 text-[11px] text-[#61554F] transition hover:border-[#E6E0D6] hover:bg-white hover:text-[#1A1513]"
         title={`Output folder: ${resolvedOutputDir}`}
       >
-        <span class="font-semibold text-[#787772]">Output:</span>
-        <span class="truncate font-mono text-[#111111]">{resolvedOutputDir}</span>
+        <span class="font-semibold text-[#7D716A]">Output:</span>
+        <span class="truncate font-mono text-[#1A1513]">{resolvedOutputDir}</span>
       </button>
     </div>
 
@@ -2394,9 +2400,9 @@
         <button
           type="button"
           onclick={() => openSettingsAt("binaries")}
-          class="flex items-center gap-1.5 rounded-full border border-[#DDA12D] bg-[#FEF7E4] px-2.5 py-1 text-[11px] font-semibold text-[#5C4107] hover:bg-[#FCEEC8]"
+          class="flex items-center gap-1.5 rounded-full border border-[#D68D1C] bg-[#FFF7E6] px-2.5 py-1 text-[11px] font-semibold text-[#5E3906] hover:bg-[#FDEBC4]"
         >
-          <span class="h-1.5 w-1.5 rounded-full bg-[#E59819]"></span>
+          <span class="h-1.5 w-1.5 rounded-full bg-[#DE941E]"></span>
           <span>Setup CLIs</span>
         </button>
       {/if}
@@ -2405,7 +2411,7 @@
         type="button"
         onclick={handleRequestEnqueue}
         disabled={!modeReady || selectedCount === 0 || queueingJobs}
-        class="rounded-md bg-[#111111] px-3.5 py-1.5 text-xs font-semibold text-white transition hover:bg-[#2A2A2A] disabled:cursor-not-allowed disabled:bg-[#C9C7C0] disabled:text-[#6B6A65]"
+        class="rounded-md bg-[#11824F] px-3.5 py-1.5 text-xs font-semibold text-white shadow-[0_1px_2px_rgba(17,130,79,0.22)] transition hover:bg-[#0D6E42] disabled:cursor-not-allowed disabled:bg-[#C6BEB1] disabled:text-[#70645D] disabled:shadow-none"
       >
         {#if queueingJobs}
           Queueing...
@@ -2427,12 +2433,12 @@
   <!-- Row 3: Compact IMDb / TVDB / TMDB Metadata Strip -->
   <section
     aria-label="Media titling and naming"
-    class="relative shrink-0 space-y-2 border-b border-[#E5E3DD] bg-white px-5 py-2.5"
+    class="relative shrink-0 space-y-2 border-b border-[#E6E0D6] bg-white px-5 py-2.5"
   >
     <div class="flex flex-wrap items-center gap-2">
       <!-- Movie / TV Toggle -->
       <div
-        class="inline-flex rounded-md border border-[#E5E3DD] bg-[#F8F7F4] p-0.5 text-[11px]"
+        class="inline-flex rounded-md border border-[#E6E0D6] bg-[#FAF8F4] p-0.5 text-[11px]"
         role="group"
         aria-label="Media type"
       >
@@ -2441,8 +2447,8 @@
           onclick={() => (mediaKind = "movie")}
           class={`rounded px-2 py-0.5 font-semibold transition ${
             mediaKind === "movie"
-              ? "bg-white text-[#111111] shadow-[0_1px_1px_rgba(0,0,0,0.06)]"
-              : "text-[#6B6A65] hover:text-[#111111]"
+              ? "bg-white text-[#1A1513] shadow-[0_1px_1px_rgba(0,0,0,0.06)]"
+              : "text-[#70645D] hover:text-[#1A1513]"
           }`}
         >
           Movie
@@ -2452,8 +2458,8 @@
           onclick={() => (mediaKind = "tvEpisode")}
           class={`rounded px-2 py-0.5 font-semibold transition ${
             mediaKind === "tvEpisode"
-              ? "bg-white text-[#111111] shadow-[0_1px_1px_rgba(0,0,0,0.06)]"
-              : "text-[#6B6A65] hover:text-[#111111]"
+              ? "bg-white text-[#1A1513] shadow-[0_1px_1px_rgba(0,0,0,0.06)]"
+              : "text-[#70645D] hover:text-[#1A1513]"
           }`}
         >
           TV
@@ -2471,13 +2477,13 @@
           placeholder={mediaKind === "movie"
             ? "Movie title or disc label (e.g. THE_MATRIX_1999_DISC_1)"
             : "TV series title (e.g. Breaking Bad)"}
-          class="min-w-0 flex-1 rounded-md border border-[#DFDDD6] bg-[#FAF9F6] px-2.5 py-1 text-xs text-[#111111] placeholder:text-[#9D9B94] outline-none focus:border-[#111111] focus:bg-white"
+          class="min-w-0 flex-1 rounded-md border border-[#DAD3C7] bg-[#F7F4EE] px-2.5 py-1 text-xs text-[#1A1513] placeholder:text-[#A1958E] outline-none focus:border-[#1A1513] focus:bg-white"
         />
         <button
           type="button"
           onclick={() => void handleCleanCurrentTitle()}
           title="Clean raw optical disc volume label"
-          class="rounded-md border border-[#DFDDD6] bg-white px-2 py-1 text-[11px] font-semibold text-[#52524E] hover:bg-[#F8F7F4] hover:text-[#111111]"
+          class="rounded-md border border-[#DAD3C7] bg-white px-2 py-1 text-[11px] font-semibold text-[#544943] hover:bg-[#FAF8F4] hover:text-[#1A1513]"
         >
           Clean
         </button>
@@ -2491,13 +2497,13 @@
         inputmode="numeric"
         bind:value={mediaYearInput}
         placeholder="Year"
-        class="w-16 rounded-md border border-[#DFDDD6] bg-[#FAF9F6] px-2 py-1 font-mono text-xs text-[#111111] placeholder:text-[#9D9B94] outline-none focus:border-[#111111] focus:bg-white"
+        class="w-16 rounded-md border border-[#DAD3C7] bg-[#F7F4EE] px-2 py-1 font-mono text-xs text-[#1A1513] placeholder:text-[#A1958E] outline-none focus:border-[#1A1513] focus:bg-white"
       />
 
       <!-- TV Season & Start Episode (inline auto-numbering for TV rows) -->
       {#if mediaKind === "tvEpisode"}
         <div class="flex items-center gap-1">
-          <label for="tv-season" class="text-[11px] font-semibold text-[#787772]">
+          <label for="tv-season" class="text-[11px] font-semibold text-[#7D716A]">
             S
           </label>
           <input
@@ -2505,11 +2511,11 @@
             type="text"
             inputmode="numeric"
             bind:value={seasonInput}
-            class="w-10 rounded-md border border-[#DFDDD6] bg-[#FAF9F6] px-1.5 py-1 text-center font-mono text-xs text-[#111111] outline-none focus:border-[#111111] focus:bg-white"
+            class="w-10 rounded-md border border-[#DAD3C7] bg-[#F7F4EE] px-1.5 py-1 text-center font-mono text-xs text-[#1A1513] outline-none focus:border-[#1A1513] focus:bg-white"
           />
           <label
             for="tv-start-ep"
-            class="text-[11px] font-semibold text-[#787772]"
+            class="text-[11px] font-semibold text-[#7D716A]"
           >
             E
           </label>
@@ -2519,7 +2525,7 @@
             inputmode="numeric"
             bind:value={startEpisodeInput}
             title="Starting episode number (rows auto-increment)"
-            class="w-10 rounded-md border border-[#DFDDD6] bg-[#FAF9F6] px-1.5 py-1 text-center font-mono text-xs text-[#111111] outline-none focus:border-[#111111] focus:bg-white"
+            class="w-10 rounded-md border border-[#DAD3C7] bg-[#F7F4EE] px-1.5 py-1 text-center font-mono text-xs text-[#1A1513] outline-none focus:border-[#1A1513] focus:bg-white"
           />
         </div>
       {/if}
@@ -2531,7 +2537,7 @@
         type="text"
         bind:value={imdbId}
         placeholder="IMDb tt..."
-        class="w-28 rounded-md border border-[#DFDDD6] bg-[#FAF9F6] px-2 py-1 font-mono text-[11px] text-[#111111] placeholder:text-[#9D9B94] outline-none focus:border-[#111111] focus:bg-white"
+        class="w-28 rounded-md border border-[#DAD3C7] bg-[#F7F4EE] px-2 py-1 font-mono text-[11px] text-[#1A1513] placeholder:text-[#A1958E] outline-none focus:border-[#1A1513] focus:bg-white"
       />
 
       <label for="tvdb-id" class="sr-only">TVDB ID or URL</label>
@@ -2540,7 +2546,7 @@
         type="text"
         bind:value={tvdbId}
         placeholder="TVDB ID"
-        class="w-24 rounded-md border border-[#DFDDD6] bg-[#FAF9F6] px-2 py-1 font-mono text-[11px] text-[#111111] placeholder:text-[#9D9B94] outline-none focus:border-[#111111] focus:bg-white"
+        class="w-24 rounded-md border border-[#DAD3C7] bg-[#F7F4EE] px-2 py-1 font-mono text-[11px] text-[#1A1513] placeholder:text-[#A1958E] outline-none focus:border-[#1A1513] focus:bg-white"
       />
 
       <label for="tmdb-id" class="sr-only">TMDB ID or URL</label>
@@ -2549,7 +2555,7 @@
         type="text"
         bind:value={tmdbId}
         placeholder="TMDB ID"
-        class="w-24 rounded-md border border-[#DFDDD6] bg-[#FAF9F6] px-2 py-1 font-mono text-[11px] text-[#111111] placeholder:text-[#9D9B94] outline-none focus:border-[#111111] focus:bg-white"
+        class="w-24 rounded-md border border-[#DAD3C7] bg-[#F7F4EE] px-2 py-1 font-mono text-[11px] text-[#1A1513] placeholder:text-[#A1958E] outline-none focus:border-[#1A1513] focus:bg-white"
       />
 
       <!-- Provider Lookup -->
@@ -2558,7 +2564,7 @@
         <select
           id="metadata-provider"
           bind:value={metadataProvider}
-          class="rounded-md border border-[#DFDDD6] bg-[#F8F7F4] px-2 py-1 text-[11px] font-semibold text-[#111111] outline-none focus:border-[#111111]"
+          class="rounded-md border border-[#DAD3C7] bg-[#FAF8F4] px-2 py-1 text-[11px] font-semibold text-[#1A1513] outline-none focus:border-[#1A1513]"
         >
           <option value="imdb">IMDb</option>
           <option value="tvdb">TVDB</option>
@@ -2569,7 +2575,7 @@
           type="button"
           onclick={() => void handleMetadataSearch()}
           disabled={searchingMetadata}
-          class="rounded-md bg-[#1D8BF8] px-2.5 py-1 text-[11px] font-semibold text-white transition hover:bg-[#137CE5] disabled:opacity-50"
+          class="rounded-md bg-[#11824F] px-2.5 py-1 text-[11px] font-semibold text-white transition hover:bg-[#0D6E42] disabled:opacity-50"
         >
           {searchingMetadata ? "..." : "Lookup"}
         </button>
@@ -2580,20 +2586,20 @@
     <div class="flex flex-wrap items-center justify-between gap-2 text-[11px]">
       <div class="flex min-w-0 flex-wrap items-center gap-1.5">
         <span
-          class="text-[10px] font-bold uppercase tracking-[0.08em] text-[#787772]"
+          class="text-[10px] font-bold uppercase tracking-[0.08em] text-[#7D716A]"
         >
           Naming:
         </span>
         {#each activeTokenChips as chip, i (`${chip}-${i}`)}
           <span
-            class="inline-flex items-center rounded border border-[#B5DAFA] bg-[#DCEEFF] px-1.5 py-0.5 font-mono text-[10px] font-medium text-[#155CA2]"
+            class="inline-flex items-center rounded border border-[#9CD9F5] bg-[#E6F6FD] px-1.5 py-0.5 font-mono text-[10px] font-medium text-[#0E5678]"
           >
             {chip}
           </span>
         {/each}
-        <span class="text-[#B8B6AF]">→</span>
+        <span class="text-[#B6AEA2]">→</span>
         <code
-          class="truncate font-mono text-[11px] text-[#3F3E3B]"
+          class="truncate font-mono text-[11px] text-[#3F3530]"
           title={outputFilenamePreview}
         >
           {outputFilenamePreview}
@@ -2605,7 +2611,7 @@
           <button
             type="button"
             onclick={() => openSettingsAt("metadata")}
-            class="rounded border border-[#E6C575] bg-[#FEF7E4] px-2 py-0.5 text-[10px] font-semibold text-[#5C4107] hover:bg-[#FCEEC8]"
+            class="rounded border border-[#E8BF6E] bg-[#FFF7E6] px-2 py-0.5 text-[10px] font-semibold text-[#5E3906] hover:bg-[#FDEBC4]"
           >
             {metadataLookupStatus}
           </button>
@@ -2615,7 +2621,7 @@
           id="naming-convention"
           value={namingConvention}
           onchange={handleNamingConventionChange}
-          class="rounded border border-[#DFDDD6] bg-[#F8F7F4] px-2 py-0.5 text-[10px] font-semibold text-[#111111]"
+          class="rounded border border-[#DAD3C7] bg-[#FAF8F4] px-2 py-0.5 text-[10px] font-semibold text-[#1A1513]"
         >
           <option value="plex">Plex {"{imdb/tvdb}"}</option>
           <option value="jellyfin">Jellyfin [imdbid/tvdbid]</option>
@@ -2627,38 +2633,38 @@
     <!-- Live Search Results Popover -->
     {#if searchResults.length > 0}
       <div
-        class="absolute top-full right-5 left-5 z-30 mt-1 max-h-80 overflow-y-auto rounded-xl border border-[#DFDDD6] bg-white shadow-[0_18px_45px_rgba(17,17,17,0.14)]"
+        class="absolute top-full right-5 left-5 z-30 mt-1 max-h-80 overflow-y-auto rounded-xl border border-[#DAD3C7] bg-white shadow-[0_18px_45px_rgba(26,21,19,0.14)]"
       >
         <div
-          class="flex items-center justify-between border-b border-[#ECEAE4] bg-[#F8F7F4] px-3.5 py-2 text-[11px]"
+          class="flex items-center justify-between border-b border-[#EDE7DE] bg-[#FAF8F4] px-3.5 py-2 text-[11px]"
         >
-          <span class="font-semibold text-[#111111]">
+          <span class="font-semibold text-[#1A1513]">
             Select a match ({searchResults.length})
           </span>
           <button
             type="button"
             onclick={() => (searchResults = [])}
-            class="font-medium text-[#787772] hover:text-[#111111]"
+            class="font-medium text-[#7D716A] hover:text-[#1A1513]"
           >
             Dismiss
           </button>
         </div>
-        <div class="divide-y divide-[#EFECE6]">
+        <div class="divide-y divide-[#EDE7DD]">
           {#each searchResults as item, idx (`${item.title}-${item.ids.imdbId ?? item.ids.tvdbId ?? item.ids.tmdbId ?? idx}`)}
             <button
               type="button"
               onclick={() => void applyMetadataResult(item)}
-              class="flex w-full items-start gap-3 px-3.5 py-2.5 text-left transition hover:bg-[#F0F7FF]"
+              class="flex w-full items-start gap-3 px-3.5 py-2.5 text-left transition hover:bg-[#EEFCF5]"
             >
               {#if item.posterUrl}
                 <img
                   src={item.posterUrl}
                   alt={item.title}
-                  class="h-14 w-10 shrink-0 rounded border border-[#E5E3DD] object-cover"
+                  class="h-14 w-10 shrink-0 rounded border border-[#E6E0D6] object-cover"
                 />
               {:else}
                 <div
-                  class="flex h-14 w-10 shrink-0 items-center justify-center rounded border border-[#E5E3DD] bg-[#F8F7F4] font-mono text-[10px] text-[#9A9891]"
+                  class="flex h-14 w-10 shrink-0 items-center justify-center rounded border border-[#E6E0D6] bg-[#FAF8F4] font-mono text-[10px] text-[#9E928B]"
                 >
                   {item.kind === "movie" ? "MOV" : "TV"}
                 </div>
@@ -2666,43 +2672,43 @@
 
               <div class="min-w-0 flex-1 space-y-1">
                 <div class="flex flex-wrap items-center gap-1.5">
-                  <span class="text-xs font-bold text-[#111111]">
+                  <span class="text-xs font-bold text-[#1A1513]">
                     {item.title}
                   </span>
                   {#if item.year}
-                    <span class="font-mono text-[11px] text-[#5C5B57]">
+                    <span class="font-mono text-[11px] text-[#61554F]">
                       ({item.year})
                     </span>
                   {/if}
                   <span
-                    class="rounded-full border border-[#E5E3DD] bg-[#F8F7F4] px-1.5 py-0.5 text-[9px] font-bold uppercase text-[#5C5B57]"
+                    class="rounded-full border border-[#E6E0D6] bg-[#FAF8F4] px-1.5 py-0.5 text-[9px] font-bold uppercase text-[#61554F]"
                   >
                     {item.kind === "movie" ? "Movie" : "TV"}
                   </span>
                   {#if item.ids.imdbId}
                     <span
-                      class="rounded border border-[#B5DAFA] bg-[#DCEEFF] px-1.5 py-0.5 font-mono text-[10px] font-medium text-[#155CA2]"
+                      class="rounded border border-[#9CD9F5] bg-[#E6F6FD] px-1.5 py-0.5 font-mono text-[10px] font-medium text-[#0E5678]"
                     >
                       imdb:{item.ids.imdbId}
                     </span>
                   {/if}
                   {#if item.ids.tvdbId}
                     <span
-                      class="rounded border border-[#B3E8CB] bg-[#E3F9EC] px-1.5 py-0.5 font-mono text-[10px] font-medium text-[#17462B]"
+                      class="rounded border border-[#9BE5C1] bg-[#E6FBF1] px-1.5 py-0.5 font-mono text-[10px] font-medium text-[#0E4D31]"
                     >
                       tvdb:{item.ids.tvdbId}
                     </span>
                   {/if}
                   {#if item.ids.tmdbId}
                     <span
-                      class="rounded border border-[#F1D89F] bg-[#FDF4DE] px-1.5 py-0.5 font-mono text-[10px] font-medium text-[#533B0B]"
+                      class="rounded border border-[#F0CB82] bg-[#FDF3DC] px-1.5 py-0.5 font-mono text-[10px] font-medium text-[#563406]"
                     >
                       tmdb:{item.ids.tmdbId}
                     </span>
                   {/if}
                 </div>
                 {#if item.overview}
-                  <p class="line-clamp-2 text-[11px] leading-snug text-[#6B6A65]">
+                  <p class="line-clamp-2 text-[11px] leading-snug text-[#70645D]">
                     {item.overview}
                   </p>
                 {/if}
@@ -2733,12 +2739,12 @@
       {/if}
       {#if workflowMode === "encodeOnly" && (folderIdentifyStatus || localVideoItems.length > 0)}
         <div
-          class="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-[#E5E3DD] bg-[#FAF9F6] px-5 py-1.5 text-[11px]"
+          class="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-[#E6E0D6] bg-[#F7F4EE] px-5 py-1.5 text-[11px]"
         >
           <div class="flex min-w-0 flex-wrap items-center gap-2">
             {#if localVideoItems.length > 0}
               <span
-                class="rounded-full border border-[#E5E3DD] bg-white px-2 py-0.5 font-mono text-[10px] font-semibold text-[#111111]"
+                class="rounded-full border border-[#E6E0D6] bg-white px-2 py-0.5 font-mono text-[10px] font-semibold text-[#1A1513]"
               >
                 {localVideoItems.length} file{localVideoItems.length === 1 ? "" : "s"}
                 {#if totalLocalSizeBytes > 0}
@@ -2747,13 +2753,13 @@
               </span>
             {/if}
             {#if folderIdentifyStatus}
-              <span class="truncate font-medium text-[#17462B]">
+              <span class="truncate font-medium text-[#0E4D31]">
                 {folderIdentifyStatus}
               </span>
             {:else if activeQualityProfile}
-              <span class="text-[#5C5B57]">
+              <span class="text-[#61554F]">
                 All checked files encode uniformly to
-                <span class="font-mono font-semibold text-[#111111]">
+                <span class="font-mono font-semibold text-[#1A1513]">
                   {shortResolutionLabel(activeQualityProfile.resolution)} {activeQualityProfile.delivery} · {shortEncoderLabel(activeQualityProfile.encoder)} · .{outputContainer}
                 </span>
               </span>
@@ -2763,7 +2769,7 @@
           <div class="flex shrink-0 items-center gap-1.5">
             {#if mediaKind === "tvEpisode" && detectedBatchSeasons.length > 1}
               <span
-                class="rounded-full border border-[#B5DAFA] bg-[#DCEEFF] px-2 py-0.5 font-mono text-[10px] font-semibold text-[#155CA2]"
+                class="rounded-full border border-[#9CD9F5] bg-[#E6F6FD] px-2 py-0.5 font-mono text-[10px] font-semibold text-[#0E5678]"
               >
                 {detectedBatchSeasons.length} seasons ({detectedBatchSeasons
                   .map((s) => `S${String(s).padStart(2, "0")}`)
@@ -2774,7 +2780,7 @@
               <button
                 type="button"
                 onclick={() => (searchResults = folderShowCandidates)}
-                class="rounded border border-[#B5DAFA] bg-[#DCEEFF] px-2 py-0.5 text-[10px] font-semibold text-[#155CA2] hover:bg-[#CBE5FE]"
+                class="rounded border border-[#9CD9F5] bg-[#E6F6FD] px-2 py-0.5 text-[10px] font-semibold text-[#0E5678] hover:bg-[#D1EFFB]"
               >
                 Switch Show ({folderShowCandidates.length})
               </button>
@@ -2783,7 +2789,7 @@
               <button
                 type="button"
                 onclick={clearLocalVideoItems}
-                class="rounded border border-[#E5E3DD] bg-white px-2 py-0.5 text-[10px] font-medium text-[#6B6A65] hover:text-red-600"
+                class="rounded border border-[#E6E0D6] bg-white px-2 py-0.5 text-[10px] font-medium text-[#70645D] hover:text-red-600"
               >
                 Clear List
               </button>
@@ -2794,7 +2800,7 @@
       <!-- Table Header -->
       {#if workflowMode === "encodeOnly"}
         <div
-          class="grid shrink-0 grid-cols-12 items-center border-b border-[#E5E3DD] bg-[#F8F7F4] px-5 py-2 text-[10px] font-bold uppercase tracking-[0.08em] text-[#787772]"
+          class="grid shrink-0 grid-cols-12 items-center border-b border-[#E6E0D6] bg-[#FAF8F4] px-5 py-2 text-[10px] font-bold uppercase tracking-[0.08em] text-[#7D716A]"
         >
           <div class="col-span-1 flex items-center">
             <input
@@ -2803,7 +2809,7 @@
               disabled={localVideoItems.length === 0}
               onchange={toggleAllRows}
               aria-label="Select all video files"
-              class="h-3.5 w-3.5 accent-[#111111]"
+              class="h-3.5 w-3.5 accent-[#1A1513]"
             />
           </div>
           <div class="col-span-2">Type / Episode</div>
@@ -2813,7 +2819,7 @@
         </div>
       {:else}
         <div
-          class="grid shrink-0 grid-cols-12 items-center border-b border-[#E5E3DD] bg-[#F8F7F4] px-5 py-2 text-[10px] font-bold uppercase tracking-[0.08em] text-[#787772]"
+          class="grid shrink-0 grid-cols-12 items-center border-b border-[#E6E0D6] bg-[#FAF8F4] px-5 py-2 text-[10px] font-bold uppercase tracking-[0.08em] text-[#7D716A]"
         >
           <div class="col-span-1 flex items-center">
             <input
@@ -2822,7 +2828,7 @@
               disabled={titles.length === 0}
               onchange={toggleAllRows}
               aria-label="Select all disc titles"
-              class="h-3.5 w-3.5 accent-[#111111]"
+              class="h-3.5 w-3.5 accent-[#1A1513]"
             />
           </div>
           <div class="col-span-4">Title / Episode</div>
@@ -2841,7 +2847,7 @@
               class="flex h-full flex-col items-center justify-center px-6 py-16 text-center"
             >
               <div
-                class="mb-3 flex h-11 w-11 items-center justify-center rounded-full border border-[#E5E3DD] bg-[#F8F7F4] text-[#5C5B57]"
+                class="mb-3 flex h-11 w-11 items-center justify-center rounded-full border border-[#E6E0D6] bg-[#FAF8F4] text-[#61554F]"
               >
                 <svg
                   class="h-5 w-5"
@@ -2855,12 +2861,12 @@
                   <path d="m10 9 5 3-5 3V9Z" />
                 </svg>
               </div>
-              <h2 class="text-sm font-bold tracking-[-0.01em] text-[#111111]">
+              <h2 class="text-sm font-bold tracking-[-0.01em] text-[#1A1513]">
                 Add a TV season folder or video files to batch encode
               </h2>
-              <p class="mt-1 max-w-md text-xs leading-relaxed text-[#787772]">
-                Drop in an entire folder of oversized <span class="font-mono text-[#111111]">.mkv</span>
-                or <span class="font-mono text-[#111111]">.mp4</span> episodes. RipDaddy
+              <p class="mt-1 max-w-md text-xs leading-relaxed text-[#7D716A]">
+                Drop in an entire folder of oversized <span class="font-mono text-[#1A1513]">.mkv</span>
+                or <span class="font-mono text-[#1A1513]">.mp4</span> episodes. RipDaddy
                 automatically identifies the show and episodes via TVDB/TMDB/TVMaze,
                 uniforms all filenames, generates trickplay frames, and encodes the whole
                 folder with one quality profile.
@@ -2870,7 +2876,7 @@
                   type="button"
                   onclick={() => void pickLocalVideoFolder()}
                   disabled={!modeReady || identifyingFolder}
-                  class="rounded-md bg-[#1D8BF8] px-4 py-2 text-xs font-semibold text-white transition hover:bg-[#137CE5] disabled:cursor-not-allowed disabled:bg-[#D8D6CF] disabled:text-[#787772]"
+                  class="rounded-md bg-[#11824F] px-4 py-2 text-xs font-semibold text-white transition hover:bg-[#0D6E42] disabled:cursor-not-allowed disabled:bg-[#D6CFC3] disabled:text-[#7D716A]"
                 >
                   {identifyingFolder ? "Scanning Folder..." : "+ Add TV / Video Folder"}
                 </button>
@@ -2878,20 +2884,20 @@
                   type="button"
                   onclick={() => void pickLocalVideoFiles()}
                   disabled={!modeReady || identifyingFolder}
-                  class="rounded-md border border-[#DFDDD6] bg-white px-4 py-2 text-xs font-semibold text-[#111111] transition hover:bg-[#F8F7F4] disabled:cursor-not-allowed disabled:opacity-50"
+                  class="rounded-md border border-[#DAD3C7] bg-white px-4 py-2 text-xs font-semibold text-[#1A1513] transition hover:bg-[#FAF8F4] disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   + Add Video Files
                 </button>
               </div>
             </div>
           {:else}
-            <div class="divide-y divide-[#EFECE6]">
+            <div class="divide-y divide-[#EDE7DD]">
               {#each localVideoItems as item, idx (item.path)}
                 <div
                   class={`grid grid-cols-12 items-center gap-2 px-5 py-2.5 text-xs transition ${
                     inspectedLocalFile === item.path
-                      ? "bg-[#F0F7FF]"
-                      : "hover:bg-[#FAF9F6]"
+                      ? "bg-[#EEFCF5]"
+                      : "hover:bg-[#F7F4EE]"
                   }`}
                 >
                   <div class="col-span-1 flex items-center">
@@ -2900,7 +2906,7 @@
                       checked={checkedLocalFiles.includes(item.path)}
                       onchange={() => toggleLocalFileChecked(item.path)}
                       aria-label={`Select ${item.fileName}`}
-                      class="h-3.5 w-3.5 accent-[#111111]"
+                      class="h-3.5 w-3.5 accent-[#1A1513]"
                     />
                   </div>
 
@@ -2910,7 +2916,7 @@
                         type="button"
                         onclick={() => toggleItemMediaKind(item.path)}
                         title="Detected as TV episode (click to switch to Movie)"
-                        class="rounded border border-[#B5DAFA] bg-[#DCEEFF] px-1 py-0.5 font-mono text-[9px] font-bold uppercase text-[#155CA2] hover:bg-[#CBE5FE]"
+                        class="rounded border border-[#9CD9F5] bg-[#E6F6FD] px-1 py-0.5 font-mono text-[9px] font-bold uppercase text-[#0E5678] hover:bg-[#D1EFFB]"
                       >
                         TV
                       </button>
@@ -2925,9 +2931,9 @@
                             "season",
                             e.currentTarget.value,
                           )}
-                        class="w-7 rounded border border-[#DFDDD6] bg-white px-0.5 py-0.5 text-center font-mono text-[10px] font-semibold text-[#111111] outline-none focus:border-[#1D8BF8]"
+                        class="w-7 rounded border border-[#DAD3C7] bg-white px-0.5 py-0.5 text-center font-mono text-[10px] font-semibold text-[#1A1513] outline-none focus:border-[#11824F]"
                       />
-                      <span class="font-mono text-[9px] text-[#787772]">×</span>
+                      <span class="font-mono text-[9px] text-[#7D716A]">×</span>
                       <input
                         type="text"
                         inputmode="numeric"
@@ -2939,14 +2945,14 @@
                             "episode",
                             e.currentTarget.value,
                           )}
-                        class="w-7 rounded border border-[#DFDDD6] bg-white px-0.5 py-0.5 text-center font-mono text-[10px] font-semibold text-[#111111] outline-none focus:border-[#1D8BF8]"
+                        class="w-7 rounded border border-[#DAD3C7] bg-white px-0.5 py-0.5 text-center font-mono text-[10px] font-semibold text-[#1A1513] outline-none focus:border-[#11824F]"
                       />
                     {:else}
                       <button
                         type="button"
                         onclick={() => toggleItemMediaKind(item.path)}
                         title="Detected as Movie (click to switch to TV episode)"
-                        class="rounded border border-[#B3E8CB] bg-[#E3F9EC] px-1.5 py-0.5 font-mono text-[9px] font-bold uppercase text-[#17462B] hover:bg-[#CEF5DF]"
+                        class="rounded border border-[#9BE5C1] bg-[#E6FBF1] px-1.5 py-0.5 font-mono text-[9px] font-bold uppercase text-[#0E4D31] hover:bg-[#CEF6E3]"
                       >
                         Movie
                       </button>
@@ -2954,7 +2960,7 @@
                         <button
                           type="button"
                           onclick={() => inspectLocalFile(item.path)}
-                          class="rounded border border-[#E6C575] bg-[#FEF7E4] px-1.5 py-0.5 text-[9px] font-semibold text-[#5C4107]"
+                          class="rounded border border-[#E8BF6E] bg-[#FFF7E6] px-1.5 py-0.5 text-[9px] font-semibold text-[#5E3906]"
                         >
                           Needs title
                         </button>
@@ -2965,7 +2971,7 @@
                             inspectLocalFile(item.path);
                             searchResults = item.movieCandidates;
                           }}
-                          class="rounded border border-[#E5E3DD] bg-white px-1.5 py-0.5 text-[9px] font-semibold text-[#5C5B57] hover:text-[#111111]"
+                          class="rounded border border-[#E6E0D6] bg-white px-1.5 py-0.5 text-[9px] font-semibold text-[#61554F] hover:text-[#1A1513]"
                         >
                           Switch
                         </button>
@@ -2980,18 +2986,18 @@
                     title={item.path}
                   >
                     <div class="flex items-center gap-1.5">
-                      <span class="truncate font-semibold text-[#111111] hover:text-[#1D8BF8]">
+                      <span class="truncate font-semibold text-[#1A1513] hover:text-[#11824F]">
                         {item.fileName}
                       </span>
                       {#if item.matchedFromCatalog}
                         <span
                           title="Matched from online catalog"
-                          class="h-1.5 w-1.5 shrink-0 rounded-full bg-[#3AD27E]"
+                          class="h-1.5 w-1.5 shrink-0 rounded-full bg-[#4CDE99]"
                         ></span>
                       {/if}
                     </div>
                     <div
-                      class="truncate font-mono text-[10px] text-[#155CA2]"
+                      class="truncate font-mono text-[10px] text-[#0E5678]"
                       title={formatItemTargetFilename(item, idx)}
                     >
                       → {formatItemTargetFilename(item, idx)}
@@ -3000,14 +3006,14 @@
 
                   <div class="col-span-2 text-right font-mono text-[11px]">
                     {#if item.durationSeconds}
-                      <span class="text-[#787772]">
+                      <span class="text-[#7D716A]">
                         {formatDurationShort(item.durationSeconds)} ·
                       </span>
                     {/if}
                     <span
                       class={(item.fileSizeBytes ?? 0) >= 8_000_000_000
-                        ? "font-semibold text-[#B4690E]"
-                        : "text-[#52524E]"}
+                        ? "font-semibold text-[#AF6C0B]"
+                        : "text-[#544943]"}
                     >
                       {formatBytesHuman(item.fileSizeBytes)}
                     </span>
@@ -3019,8 +3025,8 @@
                       onclick={() => inspectLocalFile(item.path)}
                       class={`rounded border px-2 py-0.5 text-[10px] font-semibold transition ${
                         inspectedLocalFile === item.path
-                          ? "border-[#3894E2] bg-[#DCEEFF] text-[#155CA2]"
-                          : "border-[#DFDDD6] bg-white text-[#111111] hover:bg-[#F8F7F4]"
+                          ? "border-[#1C8EC0] bg-[#E6F6FD] text-[#0E5678]"
+                          : "border-[#DAD3C7] bg-white text-[#1A1513] hover:bg-[#FAF8F4]"
                       }`}
                     >
                       {inspectedLocalFile === item.path ? "Viewing" : "Frames"}
@@ -3028,7 +3034,7 @@
                     <button
                       type="button"
                       onclick={() => removeLocalSourceFile(item.path)}
-                      class="text-[11px] font-medium text-[#787772] hover:text-red-600"
+                      class="text-[11px] font-medium text-[#7D716A] hover:text-red-600"
                     >
                       Remove
                     </button>
@@ -3042,7 +3048,7 @@
             class="flex h-full flex-col items-center justify-center px-6 py-16 text-center"
           >
             <div
-              class="mb-3 flex h-11 w-11 items-center justify-center rounded-full border border-[#E5E3DD] bg-[#F8F7F4] text-[#5C5B57]"
+              class="mb-3 flex h-11 w-11 items-center justify-center rounded-full border border-[#E6E0D6] bg-[#FAF8F4] text-[#61554F]"
             >
               <svg
                 class="h-5 w-5"
@@ -3056,27 +3062,27 @@
                 <circle cx="12" cy="12" r="2.5" />
               </svg>
             </div>
-            <h2 class="text-sm font-bold tracking-[-0.01em] text-[#111111]">
+            <h2 class="text-sm font-bold tracking-[-0.01em] text-[#1A1513]">
               {scanningDrives || scanningDisc
                 ? "Scanning optical disc..."
                 : "No disc titles loaded"}
             </h2>
-            <p class="mt-1 max-w-md text-xs leading-relaxed text-[#787772]">
+            <p class="mt-1 max-w-md text-xs leading-relaxed text-[#7D716A]">
               {#if scanStatusMessage}
                 {scanStatusMessage}
               {:else}
                 Insert a DVD or Blu-ray and click
-                <span class="font-semibold text-[#111111]">Scan</span> to populate
+                <span class="font-semibold text-[#1A1513]">Scan</span> to populate
                 titles, durations, chapters, and selectable video/audio/subtitle
                 track pills (filtering titles shorter than
-                <span class="font-mono text-[#111111]">{settings.minTitleLengthSeconds}s</span>).
+                <span class="font-mono text-[#1A1513]">{settings.minTitleLengthSeconds}s</span>).
               {/if}
             </p>
             {#if !modeReady}
               <button
                 type="button"
                 onclick={() => openSettingsAt("binaries")}
-                class="mt-4 rounded-md border border-[#DDA12D] bg-[#FEF7E4] px-3.5 py-1.5 text-xs font-semibold text-[#5C4107] hover:bg-[#FCEEC8]"
+                class="mt-4 rounded-md border border-[#D68D1C] bg-[#FFF7E6] px-3.5 py-1.5 text-xs font-semibold text-[#5E3906] hover:bg-[#FDEBC4]"
               >
                 Open Settings → External CLIs
               </button>
@@ -3084,20 +3090,20 @@
               <button
                 type="button"
                 onclick={() => void handleScanDrives()}
-                class="mt-4 rounded-md bg-[#1D8BF8] px-4 py-2 text-xs font-semibold text-white transition hover:bg-[#137CE5]"
+                class="mt-4 rounded-md bg-[#11824F] px-4 py-2 text-xs font-semibold text-white transition hover:bg-[#0D6E42]"
               >
                 Scan Optical Drives
               </button>
             {/if}
           </div>
         {:else}
-          <div class="divide-y divide-[#EFECE6]">
+          <div class="divide-y divide-[#EDE7DD]">
             {#each titles as title, idx (title.titleId)}
               <div
                 class={`grid grid-cols-12 items-center gap-2 px-5 py-2.5 text-xs transition ${
                   inspectedTitleId === title.titleId
-                    ? "bg-[#F0F7FF]"
-                    : "hover:bg-[#FAF9F6]"
+                    ? "bg-[#EEFCF5]"
+                    : "hover:bg-[#F7F4EE]"
                 }`}
               >
                 <div class="col-span-1 flex items-center">
@@ -3106,13 +3112,13 @@
                     checked={checkedTitleIds.includes(title.titleId)}
                     onchange={() => toggleTitleChecked(title.titleId)}
                     aria-label={`Select title ${title.titleId}`}
-                    class="h-3.5 w-3.5 accent-[#111111]"
+                    class="h-3.5 w-3.5 accent-[#1A1513]"
                   />
                 </div>
                 <div class="col-span-4 flex min-w-0 items-center gap-2">
                   {#if mediaKind === "tvEpisode"}
                     <span
-                      class="shrink-0 rounded border border-[#B5DAFA] bg-[#DCEEFF] px-1.5 py-0.5 font-mono text-[10px] font-semibold text-[#155CA2]"
+                      class="shrink-0 rounded border border-[#9CD9F5] bg-[#E6F6FD] px-1.5 py-0.5 font-mono text-[10px] font-semibold text-[#0E5678]"
                     >
                       {episodeCodeForRow(idx)}
                     </span>
@@ -3120,15 +3126,15 @@
                   <button
                     type="button"
                     onclick={() => inspectTitle(title.titleId)}
-                    class="truncate text-left font-semibold text-[#111111] hover:text-[#1D8BF8]"
+                    class="truncate text-left font-semibold text-[#1A1513] hover:text-[#11824F]"
                   >
                     {title.name ?? `Title #${title.titleId}`}
                   </button>
                 </div>
-                <div class="col-span-1 font-mono text-[11px] text-[#52524E]">
+                <div class="col-span-1 font-mono text-[11px] text-[#544943]">
                   {title.duration ?? "--:--"}
                 </div>
-                <div class="col-span-1 font-mono text-[11px] text-[#52524E]">
+                <div class="col-span-1 font-mono text-[11px] text-[#544943]">
                   {title.sizeHuman ?? "--"}
                 </div>
                 <div class="col-span-4 flex flex-wrap items-center gap-1">
@@ -3140,7 +3146,7 @@
                     </span>
                   {/each}
                   {#if title.streams.length > 4}
-                    <span class="font-mono text-[10px] text-[#787772]">
+                    <span class="font-mono text-[10px] text-[#7D716A]">
                       +{title.streams.length - 4}
                     </span>
                   {/if}
@@ -3149,7 +3155,7 @@
                   <button
                     type="button"
                     onclick={() => inspectTitle(title.titleId)}
-                    class="rounded border border-[#DFDDD6] bg-white px-2 py-0.5 text-[10px] font-semibold text-[#111111] hover:bg-[#F8F7F4]"
+                    class="rounded border border-[#DAD3C7] bg-white px-2 py-0.5 text-[10px] font-semibold text-[#1A1513] hover:bg-[#FAF8F4]"
                   >
                     Inspect
                   </button>

@@ -2,16 +2,29 @@
 
 :root {
   color-scheme: light;
-  --clay-canvas: #f8f7f4;
-  --clay-surface: #ffffff;
-  --clay-border: #e5e3dd;
-  --clay-ink: #111111;
-  --clay-muted: #5c5b57;
-  --clay-pink: #ff6ad5;
-  --clay-green: #3ad27e;
-  --clay-amber: #f6be4f;
-  --clay-blue: #58b0f9;
-  --clay-action-blue: #1d8bf8;
+  /* RipDaddy Mascot Brand Palette */
+  --rd-canvas: #faf8f4;
+  --rd-surface: #ffffff;
+  --rd-subtle: #f7f4ee;
+  --rd-border: #e6e0d6;
+  --rd-border-strong: #dad3c7;
+  --rd-ink: #1a1513;
+  --rd-muted: #61554f;
+
+  /* Logo Signature Accents */
+  --rd-mint: #4cde99;
+  --rd-mint-action: #11824f;
+  --rd-mint-hover: #0d6e42;
+  --rd-mint-soft: #e6fbf1;
+  --rd-coral: #fa637c;
+  --rd-coral-strong: #d9415d;
+  --rd-coral-soft: #fff0f2;
+  --rd-gold: #f8b142;
+  --rd-gold-strong: #d68d1c;
+  --rd-gold-soft: #fff7e6;
+  --rd-disc: #5bc0eb;
+  --rd-disc-strong: #1c8ec0;
+  --rd-disc-soft: #e6f6fd;
 }
 
 html,
@@ -21,8 +34,8 @@ body,
   margin: 0;
   padding: 0;
   overflow: hidden;
-  background-color: var(--clay-canvas);
-  color: var(--clay-ink);
+  background-color: var(--rd-canvas);
+  color: var(--rd-ink);
   font-family:
     "Plus Jakarta Sans",
     Inter,
@@ -46,10 +59,10 @@ body,
 }
 
 ::-webkit-scrollbar-thumb {
-  background: rgba(17, 17, 17, 0.14);
+  background: rgba(26, 21, 19, 0.16);
   border-radius: 9999px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(17, 17, 17, 0.28);
+  background: rgba(17, 130, 79, 0.36);
 }
