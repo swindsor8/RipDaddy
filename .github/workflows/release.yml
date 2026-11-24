@@ -1,0 +1,87 @@
+name: Release Installers
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  publish-tauri:
+    name: Build & Publish (${{ matrix.platform }})
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: "macos-latest"
+            args: "--target aarch64-apple-darwin"
+          - platform: "macos-latest"
+            args: "--target x86_64-apple-darwin"
+          - platform: "ubuntu-22.04"
+            args: ""
+          - platform: "windows-latest"
+            args: ""
+
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Linux Tauri v2 dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            xdg-utils \
+            libssl-dev \
+            pkg-config
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+
+      - name: Setup Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - name: Cache Cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "src-tauri -> target"
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Run frontend type check
+        run: npm run check
+
+      - name: Build and upload platform installers
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: "v__VERSION__"
+          releaseName: "RipDaddy v__VERSION__"
+          releaseBody: |
+            ## RipDaddy v__VERSION__
+
+            Cross-platform optical disc ripping & encoding orchestrator wrapping external user-installed `makemkvcon` and `HandBrakeCLI`.
+
+            ### Quick Install
+            - **Windows:** Download `.exe` (NSIS) or `.msi`
+            - **macOS:** Download `.dmg` (`aarch64` for Apple Silicon, `x64` for Intel)
+            - **Linux:** Download `.AppImage`, `.deb`, or `.rpm`
+
+            > RipDaddy bundles zero third-party binaries or decryption code. If MakeMKV and HandBrake are already installed, RipDaddy detects them automatically on first launch; otherwise the First-Run Setup Wizard can install them via `winget`, `brew`, or `flatpak`.
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.args }}

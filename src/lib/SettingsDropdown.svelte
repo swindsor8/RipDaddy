@@ -42,6 +42,7 @@
     ) => void;
     onUpdateQualityProfile: (profile: QualityProfile) => void;
     onResetQualityProfiles: (onlyKey?: string) => void;
+    onOpenSetupWizard: () => void;
     onRecheckBinaries: () => void;
     onAutoSetupAll: () => void;
     onInstallSingle: (kind: BinaryKind) => void;
@@ -66,6 +67,7 @@
     onUpdateSetting,
     onUpdateQualityProfile,
     onResetQualityProfiles,
+    onOpenSetupWizard,
     onRecheckBinaries,
     onAutoSetupAll,
     onInstallSingle,
@@ -455,12 +457,22 @@
             </div>
 
             <div
-              class="rounded-xl border border-[#E5E3DD] bg-[#F8F7F4] p-3.5 text-[11px] leading-relaxed text-[#5C5B57]"
+              class="flex items-center justify-between gap-3 rounded-xl border border-[#E5E3DD] bg-[#F8F7F4] p-3.5 text-[11px] leading-relaxed text-[#5C5B57]"
             >
-              RipDaddy bundles zero third-party binaries or decryption code. All
-              spawned <span class="font-mono font-medium text-[#111111]">makemkvcon</span>
-              and <span class="font-mono font-medium text-[#111111]">HandBrakeCLI</span>
-              child processes terminate cleanly on cancel or app exit.
+              <span>
+                RipDaddy bundles zero third-party binaries or decryption code.
+                All spawned child processes terminate cleanly on cancel or exit.
+              </span>
+              <button
+                type="button"
+                onclick={() => {
+                  onClose();
+                  onOpenSetupWizard();
+                }}
+                class="shrink-0 rounded-md border border-[#DFDDD6] bg-white px-2.5 py-1.5 text-[11px] font-semibold text-[#111111] hover:bg-[#EFECE6]"
+              >
+                Setup Wizard
+              </button>
             </div>
           </div>
 

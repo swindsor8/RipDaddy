@@ -1,0 +1,442 @@
+<script lang="ts">
+  import type {
+    BinariesCheckResult,
+    BinaryInstallOutcome,
+    BinaryKind,
+    BinarySource,
+  } from "./types";
+
+  interface Props {
+    open: boolean;
+    binaries: BinariesCheckResult | null;
+    checkingBinaries: boolean;
+    installingBinary: BinaryKind | "all" | null;
+    checkError: string | null;
+    setupOutcomes: BinaryInstallOutcome[];
+    onAutoSetupAll: () => void;
+    onInstallSingle: (kind: BinaryKind) => void;
+    onBrowseBinary: (target: "makemkv" | "handbrake") => void;
+    onRecheck: () => void;
+    onFinish: () => void;
+  }
+
+  let {
+    open,
+    binaries,
+    checkingBinaries,
+    installingBinary,
+    checkError,
+    setupOutcomes,
+    onAutoSetupAll,
+    onInstallSingle,
+    onBrowseBinary,
+    onRecheck,
+    onFinish,
+  }: Props = $props();
+
+  let copiedCommand = $state<string | null>(null);
+
+  const bothReady = $derived(
+    Boolean(binaries?.makemkv.found && binaries?.handbrake.found),
+  );
+
+  const autoInstallLabel = $derived.by(() => {
+    if (!binaries) return null;
+    const pms = new Set<string>();
+    if (!binaries.makemkv.found && binaries.makemkv.installHint.canAutoInstall) {
+      if (binaries.makemkv.installHint.packageManager) {
+        pms.add(binaries.makemkv.installHint.packageManager);
+      }
+    }
+    if (
+      !binaries.handbrake.found &&
+      binaries.handbrake.installHint.canAutoInstall
+    ) {
+      if (binaries.handbrake.installHint.packageManager) {
+        pms.add(binaries.handbrake.installHint.packageManager);
+      }
+    }
+    if (pms.size === 0) return null;
+    return Array.from(pms).join(" / ");
+  });
+
+  function formatSource(source: BinarySource): string {
+    switch (source) {
+      case "customPath":
+        return "Custom";
+      case "systemPath":
+        return "PATH";
+      case "standardInstallDir":
+        return "Auto";
+      case "flatpak":
+        return "Flatpak";
+      case "notFound":
+        return "Not Found";
+    }
+  }
+
+  async function copyCommand(command: string): Promise<void> {
+    try {
+      await navigator.clipboard.writeText(command);
+      copiedCommand = command;
+      setTimeout(() => {
+        if (copiedCommand === command) {
+          copiedCommand = null;
+        }
+      }, 2000);
+    } catch {
+      copiedCommand = null;
+    }
+  }
+</script>
+
+{#if open && binaries}
+  <div
+    class="fixed inset-0 z-50 flex items-center justify-center bg-black/25 p-4 backdrop-blur-[2px]"
+  >
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label="RipDaddy First-Run Setup"
+      class="flex w-full max-w-[640px] flex-col overflow-hidden rounded-2xl border border-[#DFDDD6] bg-white shadow-[0_28px_70px_rgba(17,17,17,0.18)]"
+    >
+      <!-- Header -->
+      <header
+        class="flex items-start justify-between gap-4 border-b border-[#E5E3DD] bg-[#F8F7F4] px-6 py-5"
+      >
+        <div class="flex items-start gap-3">
+          <svg
+            class="mt-0.5 h-8 w-8 shrink-0"
+            viewBox="0 0 28 28"
+            fill="none"
+            aria-hidden="true"
+          >
+            <path
+              d="M4 19C4 11.268 8.477 6 14 6C19.523 6 24 11.268 24 19V22H4V19Z"
+              fill="#58B0F9"
+            />
+            <path
+              d="M7.5 19.5C7.5 13.701 10.41 9.5 14 9.5C17.59 9.5 20.5 13.701 20.5 19.5V22H7.5V19.5Z"
+              fill="#3AD27E"
+            />
+            <path
+              d="M10.5 20C10.5 16.41 12.067 13.5 14 13.5C15.933 13.5 17.5 16.41 17.5 20V22H10.5V20Z"
+              fill="#F6BE4F"
+            />
+            <circle cx="14" cy="19.5" r="2.2" fill="#FF6AD5" />
+          </svg>
+          <div>
+            <div class="flex items-center gap-2">
+              <h1
+                class="text-base font-extrabold tracking-[-0.025em] text-[#111111]"
+              >
+                Welcome to RipDaddy
+              </h1>
+              <span
+                class="rounded-full border border-[#DFDDD6] bg-white px-2 py-0.5 font-mono text-[10px] font-semibold uppercase text-[#5C5B57]"
+              >
+                {binaries.platform}
+              </span>
+            </div>
+            <p class="mt-1 text-xs leading-relaxed text-[#5C5B57]">
+              RipDaddy wraps your local MakeMKV and HandBrake CLIs without
+              bundling third-party binaries. Let's make sure the tools you need
+              are ready.
+            </p>
+          </div>
+        </div>
+      </header>
+
+      <!-- Body -->
+      <div class="space-y-4 p-6">
+        {#if checkError}
+          <div
+            class="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700"
+          >
+            {checkError}
+          </div>
+        {/if}
+
+        <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          <!-- MakeMKV Card -->
+          <div
+            class="flex flex-col justify-between space-y-3 rounded-xl border border-[#E5E3DD] bg-[#FAF9F6] p-4"
+          >
+            <div class="space-y-2">
+              <div class="flex items-center justify-between gap-2">
+                <div class="flex items-center gap-2">
+                  <span
+                    class={`h-2.5 w-2.5 rounded-full ${
+                      binaries.makemkv.found ? "bg-[#3AD27E]" : "bg-[#F6BE4F]"
+                    }`}
+                  ></span>
+                  <span class="font-mono text-xs font-bold text-[#111111]">
+                    makemkvcon
+                  </span>
+                </div>
+                <span
+                  class={`rounded-full border px-2 py-0.5 font-mono text-[10px] font-semibold ${
+                    binaries.makemkv.found
+                      ? "border-[#24B465] bg-[#3AD27E] text-[#111111]"
+                      : "border-[#E5E3DD] bg-white text-[#5C5B57]"
+                  }`}
+                >
+                  {binaries.makemkv.found
+                    ? (binaries.makemkv.version ?? "Ready")
+                    : formatSource(binaries.makemkv.source)}
+                </span>
+              </div>
+
+              <p class="text-[11px] text-[#6B6A65]">
+                Used for Stage 1 optical disc ripping (<span class="font-mono">Rip Only</span> &amp; <span class="font-mono">Rip + Encode</span>).
+              </p>
+
+              {#if binaries.makemkv.found && binaries.makemkv.path}
+                <p
+                  class="truncate rounded border border-[#E5E3DD] bg-white px-2 py-1 font-mono text-[10px] text-[#52524E]"
+                  title={binaries.makemkv.path}
+                >
+                  {binaries.makemkv.path}
+                </p>
+              {:else if binaries.makemkv.path && binaries.makemkv.error}
+                <p
+                  class="rounded border border-red-200 bg-red-50 px-2 py-1 font-mono text-[10px] text-red-700"
+                >
+                  {binaries.makemkv.error}
+                </p>
+              {:else}
+                <div class="flex items-center gap-1">
+                  <code
+                    class="flex-1 truncate rounded border border-[#E5E3DD] bg-white px-2 py-1 font-mono text-[10px] text-[#111111]"
+                    title={binaries.makemkv.installHint.command}
+                  >
+                    {binaries.makemkv.installHint.command}
+                  </code>
+                  <button
+                    type="button"
+                    onclick={() => {
+                      if (binaries) {
+                        void copyCommand(binaries.makemkv.installHint.command);
+                      }
+                    }}
+                    class="rounded border border-[#DFDDD6] bg-white px-2 py-1 text-[10px] font-semibold text-[#111111] hover:bg-[#F2F0EA]"
+                  >
+                    {copiedCommand === binaries.makemkv.installHint.command
+                      ? "Copied"
+                      : "Copy"}
+                  </button>
+                </div>
+              {/if}
+            </div>
+
+            {#if !binaries.makemkv.found}
+              <div class="flex items-center gap-1.5">
+                {#if binaries.makemkv.installHint.canAutoInstall}
+                  <button
+                    type="button"
+                    onclick={() => onInstallSingle("makeMkv")}
+                    disabled={installingBinary !== null}
+                    class="flex-1 rounded-md bg-[#1D8BF8] px-2.5 py-1.5 text-[11px] font-semibold text-white hover:bg-[#137CE5] disabled:opacity-50"
+                  >
+                    {installingBinary === "makeMkv"
+                      ? "Installing..."
+                      : `Install (${binaries.makemkv.installHint.packageManager})`}
+                  </button>
+                {/if}
+                <button
+                  type="button"
+                  onclick={() => onBrowseBinary("makemkv")}
+                  class="flex-1 rounded-md border border-[#DFDDD6] bg-white px-2.5 py-1.5 text-[11px] font-semibold text-[#111111] hover:bg-[#F2F0EA]"
+                >
+                  Locate...
+                </button>
+              </div>
+            {/if}
+          </div>
+
+          <!-- HandBrakeCLI Card -->
+          <div
+            class="flex flex-col justify-between space-y-3 rounded-xl border border-[#E5E3DD] bg-[#FAF9F6] p-4"
+          >
+            <div class="space-y-2">
+              <div class="flex items-center justify-between gap-2">
+                <div class="flex items-center gap-2">
+                  <span
+                    class={`h-2.5 w-2.5 rounded-full ${
+                      binaries.handbrake.found ? "bg-[#3AD27E]" : "bg-[#F6BE4F]"
+                    }`}
+                  ></span>
+                  <span class="font-mono text-xs font-bold text-[#111111]">
+                    HandBrakeCLI
+                  </span>
+                </div>
+                <span
+                  class={`rounded-full border px-2 py-0.5 font-mono text-[10px] font-semibold ${
+                    binaries.handbrake.found
+                      ? "border-[#24B465] bg-[#3AD27E] text-[#111111]"
+                      : "border-[#E5E3DD] bg-white text-[#5C5B57]"
+                  }`}
+                >
+                  {binaries.handbrake.found
+                    ? (binaries.handbrake.version ?? "Ready")
+                    : formatSource(binaries.handbrake.source)}
+                </span>
+              </div>
+
+              <p class="text-[11px] text-[#6B6A65]">
+                Used for Stage 2 encoding (<span class="font-mono">Encode Only</span> &amp; <span class="font-mono">Rip + Encode</span>).
+              </p>
+
+              {#if binaries.handbrake.found && binaries.handbrake.path}
+                <p
+                  class="truncate rounded border border-[#E5E3DD] bg-white px-2 py-1 font-mono text-[10px] text-[#52524E]"
+                  title={binaries.handbrake.path}
+                >
+                  {binaries.handbrake.path}
+                </p>
+              {:else if binaries.handbrake.path && binaries.handbrake.error}
+                <p
+                  class="rounded border border-red-200 bg-red-50 px-2 py-1 font-mono text-[10px] text-red-700"
+                >
+                  {binaries.handbrake.error}
+                </p>
+              {:else}
+                <div class="flex items-center gap-1">
+                  <code
+                    class="flex-1 truncate rounded border border-[#E5E3DD] bg-white px-2 py-1 font-mono text-[10px] text-[#111111]"
+                    title={binaries.handbrake.installHint.command}
+                  >
+                    {binaries.handbrake.installHint.command}
+                  </code>
+                  <button
+                    type="button"
+                    onclick={() => {
+                      if (binaries) {
+                        void copyCommand(binaries.handbrake.installHint.command);
+                      }
+                    }}
+                    class="rounded border border-[#DFDDD6] bg-white px-2 py-1 text-[10px] font-semibold text-[#111111] hover:bg-[#F2F0EA]"
+                  >
+                    {copiedCommand === binaries.handbrake.installHint.command
+                      ? "Copied"
+                      : "Copy"}
+                  </button>
+                </div>
+              {/if}
+            </div>
+
+            {#if !binaries.handbrake.found}
+              <div class="flex items-center gap-1.5">
+                {#if binaries.handbrake.installHint.canAutoInstall}
+                  <button
+                    type="button"
+                    onclick={() => onInstallSingle("handBrake")}
+                    disabled={installingBinary !== null}
+                    class="flex-1 rounded-md bg-[#1D8BF8] px-2.5 py-1.5 text-[11px] font-semibold text-white hover:bg-[#137CE5] disabled:opacity-50"
+                  >
+                    {installingBinary === "handBrake"
+                      ? "Installing..."
+                      : `Install (${binaries.handbrake.installHint.packageManager})`}
+                  </button>
+                {/if}
+                <button
+                  type="button"
+                  onclick={() => onBrowseBinary("handbrake")}
+                  class="flex-1 rounded-md border border-[#DFDDD6] bg-white px-2.5 py-1.5 text-[11px] font-semibold text-[#111111] hover:bg-[#F2F0EA]"
+                >
+                  Locate...
+                </button>
+              </div>
+            {/if}
+          </div>
+        </div>
+
+        {#if setupOutcomes.length > 0}
+          <div
+            class="space-y-1 rounded-lg border border-[#E5E3DD] bg-[#F8F7F4] p-3 text-[11px]"
+          >
+            {#each setupOutcomes as outcome (outcome.binary)}
+              <p
+                class={outcome.succeeded
+                  ? "font-medium text-emerald-700"
+                  : "text-amber-800"}
+              >
+                {outcome.message}
+              </p>
+            {/each}
+          </div>
+        {/if}
+
+        <div
+          class="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[#E5E3DD] bg-[#F8F7F4] px-3.5 py-2.5 text-[11px] text-[#5C5B57]"
+        >
+          <span>
+            Output folder auto-configured to
+            <span class="font-mono font-semibold text-[#111111]">
+              {binaries.defaultPaths.outputDir}
+            </span>
+          </span>
+          <span class="font-mono text-[10px] text-[#787772]">
+            Change anytime in Settings
+          </span>
+        </div>
+      </div>
+
+      <!-- Footer Actions -->
+      <footer
+        class="flex flex-wrap items-center justify-between gap-3 border-t border-[#E5E3DD] bg-[#F8F7F4] px-6 py-4"
+      >
+        <div class="flex items-center gap-2">
+          <button
+            type="button"
+            onclick={onRecheck}
+            disabled={checkingBinaries || installingBinary !== null}
+            class="rounded-md border border-[#DFDDD6] bg-white px-3 py-1.5 text-xs font-semibold text-[#111111] hover:bg-[#EFECE6] disabled:opacity-50"
+          >
+            {checkingBinaries ? "Checking..." : "Re-check"}
+          </button>
+
+          {#if !bothReady}
+            <button
+              type="button"
+              onclick={onFinish}
+              disabled={installingBinary !== null}
+              class="px-2 py-1.5 text-xs font-medium text-[#6B6A65] hover:text-[#111111] disabled:opacity-50"
+            >
+              Skip for now
+            </button>
+          {/if}
+        </div>
+
+        {#if bothReady}
+          <button
+            type="button"
+            onclick={onFinish}
+            class="rounded-md border border-[#24B465] bg-[#3AD27E] px-4 py-2 text-xs font-bold text-[#111111] shadow-[0_1px_2px_rgba(0,0,0,0.06)] transition hover:brightness-95"
+          >
+            All Set — Open RipDaddy →
+          </button>
+        {:else if autoInstallLabel}
+          <button
+            type="button"
+            onclick={onAutoSetupAll}
+            disabled={installingBinary !== null}
+            class="rounded-md bg-[#111111] px-4 py-2 text-xs font-semibold text-white transition hover:bg-[#2A2A2A] disabled:opacity-50"
+          >
+            {installingBinary === "all"
+              ? `Installing via ${autoInstallLabel}...`
+              : `Auto-Install Missing CLIs (${autoInstallLabel}) →`}
+          </button>
+        {:else}
+          <button
+            type="button"
+            onclick={onFinish}
+            class="rounded-md bg-[#111111] px-4 py-2 text-xs font-semibold text-white transition hover:bg-[#2A2A2A]"
+          >
+            Continue to RipDaddy →
+          </button>
+        {/if}
+      </footer>
+    </div>
+  </div>
+{/if}

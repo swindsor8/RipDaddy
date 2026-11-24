@@ -1,0 +1,18 @@
+# Starter WinGet installer manifest template for RipDaddy.
+# Declaring PackageDependencies tells winget to automatically install upstream
+# HandBrakeCLI and MakeMKV alongside RipDaddy without bundling either binary.
+PackageIdentifier: swindsor8.RipDaddy
+PackageVersion: 0.1.0
+InstallerLocale: en-US
+InstallerType: nullsoft
+Scope: user
+Dependencies:
+  PackageDependencies:
+    - PackageIdentifier: HandBrake.HandBrake.CLI
+    - PackageIdentifier: GuinpinSoft.MakeMKV
+Installers:
+  - Architecture: x64
+    InstallerUrl: https://github.com/swindsor8/RipDaddy/releases/download/v0.1.0/RipDaddy_0.1.0_x64-setup.exe
+    InstallerSha256: REPLACE_WITH_EXE_SHA256
+ManifestType: installer
+ManifestVersion: 1.6.0

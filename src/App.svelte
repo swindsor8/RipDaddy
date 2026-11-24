@@ -3,6 +3,7 @@
   import { invoke } from "@tauri-apps/api/core";
   import { open } from "@tauri-apps/plugin-dialog";
   import { Store } from "@tauri-apps/plugin-store";
+  import FirstRunSetupModal from "./lib/FirstRunSetupModal.svelte";
   import PreviewDrawer from "./lib/PreviewDrawer.svelte";
   import QueueDock from "./lib/QueueDock.svelte";
   import SettingsDropdown from "./lib/SettingsDropdown.svelte";
@@ -47,9 +48,10 @@
   let checkError = $state<string | null>(null);
   let setupOutcomes = $state<BinaryInstallOutcome[]>([]);
 
-  // Categorized settings dropdown state
+  // Categorized settings dropdown & first-run onboarding state
   let settingsOpen = $state(false);
   let settingsCategory = $state<SettingsCategory>("general");
+  let firstRunModalOpen = $state(false);
 
   let settings = $state<AppSettings>({
     defaultMode: "ripAndEncode",
@@ -756,19 +758,25 @@
     }
   }
 
+  function dismissFirstRunModal(): void {
+    firstRunModalOpen = false;
+    updateSetting("firstRunSetupDone", true);
+  }
+
   async function initialize(): Promise<void> {
     await loadPersistedSettings();
     const [detected] = await Promise.all([runCheckBinaries(), refreshQueue()]);
 
-    if (
-      detected &&
-      settings.autoSetupOnFirstRun &&
-      !settings.firstRunSetupDone &&
-      ((!detected.makemkv.found && detected.makemkv.installHint.canAutoInstall) ||
-        (!detected.handbrake.found &&
-          detected.handbrake.installHint.canAutoInstall))
-    ) {
-      await runAutoSetupAll();
+    if (detected) {
+      const bothFound = detected.makemkv.found && detected.handbrake.found;
+      if (bothFound) {
+        if (!settings.firstRunSetupDone) {
+          updateSetting("firstRunSetupDone", true);
+        }
+      } else if (!settings.firstRunSetupDone && settings.autoSetupOnFirstRun) {
+        // Show the clean 1-step onboarding modal only when a CLI is missing
+        firstRunModalOpen = true;
+      }
     }
   }
 
@@ -1661,6 +1669,7 @@
     onUpdateSetting={updateSetting}
     onUpdateQualityProfile={handleUpdateQualityProfile}
     onResetQualityProfiles={(key) => void handleResetQualityProfiles(key)}
+    onOpenSetupWizard={() => (firstRunModalOpen = true)}
     onRecheckBinaries={() => void runCheckBinaries()}
     onAutoSetupAll={() => void runAutoSetupAll()}
     onInstallSingle={(kind) => void runInstallSingle(kind)}
@@ -1669,5 +1678,20 @@
     onBrowseDirectory={(target) => void browseDirectory(target)}
     onResetDirectory={(target) => updateSetting(target, null)}
     onBrowseCustomPreset={() => void browseCustomPresetFile()}
+  />
+
+  <!-- First-Run Onboarding Modal (auto-skipped when both CLIs are already installed) -->
+  <FirstRunSetupModal
+    open={firstRunModalOpen}
+    {binaries}
+    {checkingBinaries}
+    {installingBinary}
+    {checkError}
+    {setupOutcomes}
+    onAutoSetupAll={() => void runAutoSetupAll()}
+    onInstallSingle={(kind) => void runInstallSingle(kind)}
+    onBrowseBinary={(target) => void browseBinary(target)}
+    onRecheck={() => void runCheckBinaries()}
+    onFinish={dismissFirstRunModal}
   />
 </div>
