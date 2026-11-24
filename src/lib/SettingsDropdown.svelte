@@ -1,5 +1,6 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
+  import RipDaddyLogo from "./RipDaddyLogo.svelte";
   import {
     AUDIO_BITRATES,
     ENCODER_PRESETS,
@@ -471,10 +472,13 @@
             <div
               class="flex items-center justify-between gap-3 rounded-xl border border-[#E5E3DD] bg-[#F8F7F4] p-3.5 text-[11px] leading-relaxed text-[#5C5B57]"
             >
-              <span>
-                RipDaddy bundles zero third-party binaries or decryption code.
-                All spawned child processes terminate cleanly on cancel or exit.
-              </span>
+              <div class="flex items-center gap-3">
+                <RipDaddyLogo class="h-8 w-8" alt="" />
+                <span>
+                  RipDaddy bundles zero third-party binaries or decryption code.
+                  All spawned child processes terminate cleanly on cancel or exit.
+                </span>
+              </div>
               <button
                 type="button"
                 onclick={() => {

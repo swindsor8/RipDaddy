@@ -1,4 +1,8 @@
-# RipDaddy
+<p align="center">
+  <img src="src/assets/ripdaddy-logo.png" alt="RipDaddy Logo" width="128" />
+</p>
+
+<h1 align="center">RipDaddy</h1>
 
 RipDaddy is a fast, lightweight, cross-platform desktop orchestration wrapper built with **Tauri v2 (Rust)**, **Svelte 5 (TypeScript, Runes)**, and **Tailwind CSS v4**.
 

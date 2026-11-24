@@ -1,4 +1,5 @@
 <script lang="ts">
+  import RipDaddyLogo from "./RipDaddyLogo.svelte";
   import type {
     BinariesCheckResult,
     BinaryInstallOutcome,
@@ -105,26 +106,7 @@
         class="flex items-start justify-between gap-4 border-b border-[#E5E3DD] bg-[#F8F7F4] px-6 py-5"
       >
         <div class="flex items-start gap-3">
-          <svg
-            class="mt-0.5 h-8 w-8 shrink-0"
-            viewBox="0 0 28 28"
-            fill="none"
-            aria-hidden="true"
-          >
-            <path
-              d="M4 19C4 11.268 8.477 6 14 6C19.523 6 24 11.268 24 19V22H4V19Z"
-              fill="#58B0F9"
-            />
-            <path
-              d="M7.5 19.5C7.5 13.701 10.41 9.5 14 9.5C17.59 9.5 20.5 13.701 20.5 19.5V22H7.5V19.5Z"
-              fill="#3AD27E"
-            />
-            <path
-              d="M10.5 20C10.5 16.41 12.067 13.5 14 13.5C15.933 13.5 17.5 16.41 17.5 20V22H10.5V20Z"
-              fill="#F6BE4F"
-            />
-            <circle cx="14" cy="19.5" r="2.2" fill="#FF6AD5" />
-          </svg>
+          <RipDaddyLogo class="mt-0.5 h-11 w-11" alt="" />
           <div>
             <div class="flex items-center gap-2">
               <h1
