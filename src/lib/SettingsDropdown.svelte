@@ -241,7 +241,8 @@
     if (
       value === "ripOnly" ||
       value === "encodeOnly" ||
-      value === "ripAndEncode"
+      value === "ripAndEncode" ||
+      value === "organizeOnly"
     ) {
       onUpdateSetting("defaultMode", value);
     }
@@ -398,6 +399,7 @@
                 <option value="ripAndEncode">Rip + Encode (Two-Stage Pipeline)</option>
                 <option value="ripOnly">Rip Only (MakeMKV Remux)</option>
                 <option value="encodeOnly">Encode Only (Local Video Files)</option>
+                <option value="organizeOnly">Organize Only (Lookup &amp; Rename Folder)</option>
               </select>
             </div>
 

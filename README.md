@@ -6,10 +6,11 @@
 
 RipDaddy is a fast, lightweight, cross-platform desktop orchestration wrapper built with **Tauri v2 (Rust)**, **Svelte 5 (TypeScript, Runes)**, and **Tailwind CSS v4**.
 
-It supports three flexible workflows around **external, user-installed** CLI binaries:
+It supports four flexible workflows around **external, user-installed** CLI binaries (plus zero-CLI folder organization):
 - **Rip Only:** `makemkvcon -r` directly to lossless MKV output
 - **Encode Only:** `HandBrakeCLI --json` on existing local video files with native 16:9 preview
 - **Rip + Encode:** Decoupled two-stage pipeline (`makemkvcon` -> temp MKV -> `HandBrakeCLI` -> temp file cleanup)
+- **Organize:** Connect any existing movie or TV folder to run IMDb / TVDB / TMDB / TVMaze lookups, dry-run preview renames & companion `.srt`/`.nfo` sidecars, reorganize in place or to a target library, and revert with one-click Undo (no MakeMKV or HandBrake required)
 
 ### Highlights
 - **Customizable Quality Matrix (480p / 720p / 1080p / 4K × Local / Remote):** Pre-tuned profiles for home LAN direct play (10-bit x265, audio passthrough, MKV) vs. remote streaming (compact RF, AAC, web-optimized MP4), editable per slot with live `HandBrakeCLI` flag preview.

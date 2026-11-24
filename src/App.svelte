@@ -6,6 +6,7 @@
   import { Store } from "@tauri-apps/plugin-store";
   import FirstRunSetupModal from "./lib/FirstRunSetupModal.svelte";
   import FolderOrganizeModal from "./lib/FolderOrganizeModal.svelte";
+  import OrganizeReviewModal from "./lib/OrganizeReviewModal.svelte";
   import PreviewDrawer from "./lib/PreviewDrawer.svelte";
   import QueueDock from "./lib/QueueDock.svelte";
   import RipDaddyLogo from "./lib/RipDaddyLogo.svelte";
@@ -44,6 +45,8 @@
     MetadataSearchQuery,
     NamingConvention,
     OpticalDrive,
+    OrganizeExecutionResult,
+    OrganizeFileRequest,
     PipelineEvent,
     PipelineMode,
     PreviewFrame,
@@ -53,7 +56,9 @@
     SettingsCategory,
     StreamTrack,
     TrickplayPreview,
+    UndoOrganizeResult,
     VideoMediaInfo,
+    WorkspaceMode,
   } from "./lib/types";
 
   const SETTINGS_STORE_FILE = "settings.json";
@@ -96,7 +101,7 @@
   });
 
   // Active workspace mode
-  let workflowMode = $state<PipelineMode>("ripAndEncode");
+  let workflowMode = $state<WorkspaceMode>("ripAndEncode");
 
   // Layout panels
   let previewOpen = $state(true);
@@ -124,6 +129,10 @@
   let folderShowCandidates = $state<MediaMetadata[]>([]);
   let seriesEpisodeCatalog = $state<EpisodeInfo[]>([]);
   let organizeModalOpen = $state(false);
+  let organizeReviewOpen = $state(false);
+  let lastOrganizeResult = $state<OrganizeExecutionResult | null>(null);
+  let undoingOrganize = $state(false);
+  let organizeUndoBanner = $state<string | null>(null);
 
   // Auto-generated trickplay frame preview cache & state
   let trickplayCache = $state<Record<string, TrickplayPreview>>({});
@@ -184,7 +193,14 @@
     workflowMode === "encodeOnly" || workflowMode === "ripAndEncode",
   );
 
+  const isLocalMode = $derived(
+    workflowMode === "encodeOnly" || workflowMode === "organizeOnly",
+  );
+
+  const isOrganizeMode = $derived(workflowMode === "organizeOnly");
+
   const modeReady = $derived.by(() => {
+    if (!requiresMakeMkv && !requiresHandBrake) return true;
     if (!binaries) return false;
     const mkvOk = !requiresMakeMkv || binaries.makemkv.found;
     const hbOk = !requiresHandBrake || binaries.handbrake.found;
@@ -217,13 +233,11 @@
   );
 
   const selectedCount = $derived(
-    workflowMode === "encodeOnly"
-      ? checkedLocalFiles.length
-      : checkedTitleIds.length,
+    isLocalMode ? checkedLocalFiles.length : checkedTitleIds.length,
   );
 
   const allRowsChecked = $derived.by(() => {
-    if (workflowMode === "encodeOnly") {
+    if (isLocalMode) {
       return (
         localVideoItems.length > 0 &&
         checkedLocalFiles.length === localVideoItems.length
@@ -282,7 +296,7 @@
   }
 
   const activeBatchKind = $derived.by<FolderContentKind>(() => {
-    if (workflowMode === "encodeOnly" && localVideoItems.length > 0) {
+    if (isLocalMode && localVideoItems.length > 0) {
       const selected = localVideoItems.filter((item) =>
         checkedLocalFiles.includes(item.path),
       );
@@ -298,7 +312,7 @@
 
   const detectedBatchSeasons = $derived.by<number[]>(() => {
     const set = new Set<number>();
-    if (workflowMode === "encodeOnly") {
+    if (isLocalMode) {
       const selected = localVideoItems.filter((item) =>
         checkedLocalFiles.includes(item.path),
       );
@@ -316,6 +330,7 @@
 
   const recommendedFolderOrg = $derived.by<FolderOrganization>(() => {
     const outDir = (
+      (isOrganizeMode && sourceFolderPath ? sourceFolderPath : null) ||
       settings.outputDir ||
       binaries?.defaultPaths.outputDir ||
       ""
@@ -365,7 +380,7 @@
     const tvShowTitle = sharedTvShow?.title || mediaTitle.trim() || "Untitled Show";
     const tvShowYear = sharedTvShow?.year ?? parsedYear;
 
-    if (workflowMode === "encodeOnly") {
+    if (isLocalMode) {
       const ordered = localVideoItems.filter((item) =>
         checkedLocalFiles.includes(item.path),
       );
@@ -469,8 +484,7 @@
 
   // Live output path preview backed by Rust's metadata::format_output_relative_path
   $effect(() => {
-    const activeItem =
-      workflowMode === "encodeOnly" ? inspectedLocalItem : null;
+    const activeItem = isLocalMode ? inspectedLocalItem : null;
     const previewSeason =
       mediaKind === "tvEpisode"
         ? (activeItem?.season ?? parsedSeason)
@@ -498,7 +512,12 @@
       posterUrl: null,
     };
     const convention = namingConvention;
-    const ext = workflowMode === "ripOnly" ? "mkv" : outputContainer;
+    const ext =
+      workflowMode === "ripOnly"
+        ? "mkv"
+        : workflowMode === "organizeOnly" && activeItem
+          ? fileExtensionOf(activeItem.fileName)
+          : outputContainer;
     const folderOrg = effectivePreviewFolderOrg;
 
     let cancelled = false;
@@ -546,7 +565,7 @@
     settings[key] = value;
 
     if (key === "defaultMode") {
-      workflowMode = value as PipelineMode;
+      workflowMode = value as WorkspaceMode;
     } else if (key === "defaultContainer") {
       outputContainer = value as string;
     } else if (key === "namingConvention") {
@@ -568,7 +587,7 @@
       settingsStore = await Store.load(SETTINGS_STORE_FILE);
 
       settings.defaultMode =
-        (await readStoreValue<PipelineMode>("defaultMode")) ?? "ripAndEncode";
+        (await readStoreValue<WorkspaceMode>("defaultMode")) ?? "ripAndEncode";
       settings.autoSetupOnFirstRun =
         (await readStoreValue<boolean>("autoSetupOnFirstRun")) ?? true;
       settings.firstRunSetupDone =
@@ -855,11 +874,19 @@
       .trim();
   }
 
+  function fileExtensionOf(fileName: string): string {
+    const idx = fileName.lastIndexOf(".");
+    if (idx <= 0 || idx === fileName.length - 1) return "mkv";
+    return fileName.slice(idx + 1).toLowerCase();
+  }
+
   function formatItemTargetFilename(
     item: IdentifiedVideoFile,
     rowIndex: number,
   ): string {
-    const ext = outputContainer || "mkv";
+    const ext = isOrganizeMode
+      ? fileExtensionOf(item.fileName)
+      : outputContainer || "mkv";
 
     if (item.mediaKind === "movie") {
       const meta = item.movieMetadata;
@@ -1063,12 +1090,16 @@
   async function pickLocalVideoFolder(): Promise<void> {
     try {
       const selected = await open({
-        title: "Select a TV season or video folder to identify & batch encode",
+        title: isOrganizeMode
+          ? "Connect a movie or TV folder to look up, rename & reorganize"
+          : "Select a TV season or video folder to identify & batch encode",
         directory: true,
         multiple: false,
       });
       if (typeof selected !== "string" || selected.trim().length === 0) return;
 
+      lastOrganizeResult = null;
+      organizeUndoBanner = null;
       identifyingFolder = true;
       queueActionError = null;
       folderIdentifyStatus = "Scanning folder and identifying show & episodes...";
@@ -1087,6 +1118,25 @@
     } catch (err) {
       checkError =
         err instanceof Error ? err.message : "Failed to open folder dialog.";
+    }
+  }
+
+  async function rescanConnectedFolder(): Promise<void> {
+    if (!sourceFolderPath || identifyingFolder) return;
+    identifyingFolder = true;
+    queueActionError = null;
+    folderIdentifyStatus = "Rescanning connected folder...";
+    try {
+      const res = await invoke<FolderIdentifyResult>("identify_video_folder", {
+        folderPath: sourceFolderPath,
+        config: currentMetadataConfig(),
+      });
+      applyFolderIdentifyResult(res, true);
+    } catch (err) {
+      folderIdentifyStatus = null;
+      queueActionError = err instanceof Error ? err.message : String(err);
+    } finally {
+      identifyingFolder = false;
     }
   }
 
@@ -1223,7 +1273,7 @@
   }
 
   function toggleAllRows(): void {
-    if (workflowMode === "encodeOnly") {
+    if (isLocalMode) {
       checkedLocalFiles = allRowsChecked
         ? []
         : localVideoItems.map((item) => item.path);
@@ -1552,7 +1602,7 @@
   $effect(() => {
     const file = inspectedLocalFile;
     const mode = workflowMode;
-    if (mode === "encodeOnly" && file) {
+    if ((mode === "encodeOnly" || mode === "organizeOnly") && file) {
       void loadTrickplayPreview(file, false);
     }
   });
@@ -1602,8 +1652,138 @@
     };
   }
 
+  function buildLocalItemMetadata(
+    item: IdentifiedVideoFile,
+    idx: number,
+    totalSelected: number,
+  ): MediaMetadata {
+    const base = item.fileName.replace(/\.[^.]+$/, "");
+    if (item.mediaKind === "movie") {
+      if (item.movieMetadata) {
+        return { ...item.movieMetadata, kind: "movie" };
+      }
+      return {
+        kind: "movie",
+        title:
+          inspectedLocalFile === item.path && mediaTitle.trim()
+            ? mediaTitle.trim()
+            : totalSelected === 1 && mediaTitle.trim()
+              ? mediaTitle.trim()
+              : base,
+        year:
+          inspectedLocalFile === item.path || totalSelected === 1
+            ? parsedYear
+            : null,
+        season: null,
+        episode: null,
+        episodeTitle: null,
+        ids:
+          inspectedLocalFile === item.path || totalSelected === 1
+            ? {
+                imdbId: imdbId.trim() || null,
+                tvdbId: tvdbId.trim() || null,
+                tmdbId: tmdbId.trim() || null,
+              }
+            : { imdbId: null, tvdbId: null, tmdbId: null },
+        overview: null,
+        posterUrl: null,
+      };
+    }
+
+    const tvTitle = sharedTvShow?.title || mediaTitle.trim() || base;
+    const tvYear = sharedTvShow?.year ?? parsedYear;
+    const tvIds: ExternalIds = sharedTvShow?.ids ?? {
+      imdbId: imdbId.trim() || null,
+      tvdbId: tvdbId.trim() || null,
+      tmdbId: tmdbId.trim() || null,
+    };
+    const epSeason = item.season ?? parsedSeason;
+    const epNum = item.episode ?? parsedStartEpisode + idx;
+    return {
+      kind: "tvEpisode",
+      title: tvTitle,
+      year: tvYear,
+      season: epSeason,
+      episode: epNum,
+      episodeTitle: item.episodeTitle,
+      ids: tvIds,
+      overview: sharedTvShow?.overview ?? selectedOverview,
+      posterUrl: sharedTvShow?.posterUrl ?? selectedPosterUrl,
+    };
+  }
+
+  const organizeFileRequests = $derived.by<OrganizeFileRequest[]>(() => {
+    if (!isOrganizeMode) return [];
+    const ordered = localVideoItems.filter((item) =>
+      checkedLocalFiles.includes(item.path),
+    );
+    return ordered.map((item, idx) => ({
+      sourcePath: item.path,
+      mediaMetadata: buildLocalItemMetadata(item, idx, ordered.length),
+    }));
+  });
+
+  function handleOrganizeCompleted(result: OrganizeExecutionResult): void {
+    organizeReviewOpen = false;
+    lastOrganizeResult = result;
+    organizeUndoBanner = null;
+    queueActionError =
+      result.errors.length > 0 ? result.errors.join(" · ") : null;
+
+    if (result.transferMode === "move" && result.operations.length > 0) {
+      const movedMap = new Map<string, string>();
+      for (const op of result.operations) {
+        if (!op.isSidecar) {
+          movedMap.set(op.sourcePath, op.targetPath);
+        }
+      }
+      if (movedMap.size > 0) {
+        localVideoItems = localVideoItems.map((item) => {
+          const nextPath = movedMap.get(item.path);
+          if (!nextPath) return item;
+          return {
+            ...item,
+            path: nextPath,
+            fileName: fileBaseName(nextPath),
+          };
+        });
+        checkedLocalFiles = checkedLocalFiles.map(
+          (p) => movedMap.get(p) ?? p,
+        );
+        if (inspectedLocalFile && movedMap.has(inspectedLocalFile)) {
+          inspectedLocalFile = movedMap.get(inspectedLocalFile) ?? null;
+        }
+      }
+    }
+  }
+
+  async function handleUndoLastOrganize(): Promise<void> {
+    if (undoingOrganize) return;
+    undoingOrganize = true;
+    queueActionError = null;
+    try {
+      const res = await invoke<UndoOrganizeResult>("undo_last_organize");
+      lastOrganizeResult = null;
+      organizeUndoBanner = res.statusMessage;
+      if (res.errors.length > 0) {
+        queueActionError = res.errors.join(" · ");
+      }
+      if (sourceFolderPath) {
+        await rescanConnectedFolder();
+      }
+    } catch (err) {
+      queueActionError = err instanceof Error ? err.message : String(err);
+    } finally {
+      undoingOrganize = false;
+    }
+  }
+
   function handleRequestEnqueue(): void {
     if (!modeReady || selectedCount === 0 || queueingJobs) return;
+    if (workflowMode === "organizeOnly") {
+      organizeReviewOpen = true;
+      return;
+    }
     const shouldPrompt =
       settings.tvFolderOrganization === "ask" &&
       (activeBatchKind === "tvSeries" ||
@@ -1635,7 +1815,10 @@
   async function executeEnqueueSelected(
     folderOrg: FolderOrganization | null,
   ): Promise<void> {
-    if (!modeReady || selectedCount === 0) return;
+    if (!modeReady || selectedCount === 0 || workflowMode === "organizeOnly") {
+      return;
+    }
+    const pipelineMode: PipelineMode = workflowMode;
     queueingJobs = true;
     queueActionError = null;
 
@@ -1647,42 +1830,13 @@
       const effectiveTempDir =
         settings.tempDir || binaries?.defaultPaths.tempDir || "";
 
-      if (workflowMode === "encodeOnly") {
+      if (pipelineMode === "encodeOnly") {
         const ordered = localVideoItems.filter((item) =>
           checkedLocalFiles.includes(item.path),
         );
         ordered.forEach((item, idx) => {
-          const base = item.fileName.replace(/\.[^.]+$/, "");
-
+          const meta = buildLocalItemMetadata(item, idx, ordered.length);
           if (item.mediaKind === "movie") {
-            const meta: MediaMetadata = item.movieMetadata
-              ? { ...item.movieMetadata, kind: "movie" }
-              : {
-                  kind: "movie",
-                  title:
-                    inspectedLocalFile === item.path && mediaTitle.trim()
-                      ? mediaTitle.trim()
-                      : ordered.length === 1 && mediaTitle.trim()
-                        ? mediaTitle.trim()
-                        : base,
-                  year:
-                    inspectedLocalFile === item.path || ordered.length === 1
-                      ? parsedYear
-                      : null,
-                  season: null,
-                  episode: null,
-                  episodeTitle: null,
-                  ids:
-                    inspectedLocalFile === item.path || ordered.length === 1
-                      ? {
-                          imdbId: imdbId.trim() || null,
-                          tvdbId: tvdbId.trim() || null,
-                          tmdbId: tmdbId.trim() || null,
-                        }
-                      : { imdbId: null, tvdbId: null, tmdbId: null },
-                  overview: null,
-                  posterUrl: null,
-                };
             const titleLabel = meta.year
               ? `${meta.title} (${meta.year})`
               : meta.title;
@@ -1706,20 +1860,12 @@
               mediaMetadata: meta,
             });
           } else {
-            const tvTitle =
-              sharedTvShow?.title || mediaTitle.trim() || base;
-            const tvYear = sharedTvShow?.year ?? parsedYear;
-            const tvIds: ExternalIds = sharedTvShow?.ids ?? {
-              imdbId: imdbId.trim() || null,
-              tvdbId: tvdbId.trim() || null,
-              tmdbId: tmdbId.trim() || null,
-            };
-            const epSeason = item.season ?? parsedSeason;
-            const epNum = item.episode ?? parsedStartEpisode + idx;
+            const epSeason = meta.season ?? parsedSeason;
+            const epNum = meta.episode ?? parsedStartEpisode + idx;
             const epCode = `S${String(epSeason).padStart(2, "0")}E${String(epNum).padStart(2, "0")}`;
-            const titleLabel = item.episodeTitle
-              ? `${tvTitle} ${epCode} - ${item.episodeTitle}`
-              : `${tvTitle} ${epCode}`;
+            const titleLabel = meta.episodeTitle
+              ? `${meta.title} ${epCode} - ${meta.episodeTitle}`
+              : `${meta.title} ${epCode}`;
             requests.push({
               mode: "encodeOnly",
               discName: "Local File",
@@ -1737,17 +1883,7 @@
               autoEjectDisc: false,
               namingConvention,
               folderOrganization: folderOrg,
-              mediaMetadata: {
-                kind: "tvEpisode",
-                title: tvTitle,
-                year: tvYear,
-                season: epSeason,
-                episode: epNum,
-                episodeTitle: item.episodeTitle,
-                ids: tvIds,
-                overview: sharedTvShow?.overview ?? selectedOverview,
-                posterUrl: sharedTvShow?.posterUrl ?? selectedPosterUrl,
-              },
+              mediaMetadata: meta,
             });
           }
         });
@@ -1764,7 +1900,7 @@
                 ? mediaTitle.trim()
                 : fallback;
           requests.push({
-            mode: workflowMode,
+            mode: pipelineMode,
             discName: activeDiscName || activeDrive?.discName || "Optical Disc",
             driveIndex: selectedDriveIndex,
             driveDevicePath: activeDrive?.devicePath ?? null,
@@ -1772,11 +1908,11 @@
             sourceFilePath: null,
             titleName: titleLabel,
             qualityProfile:
-              workflowMode === "ripOnly" ? null : activeQualityProfile,
+              pipelineMode === "ripOnly" ? null : activeQualityProfile,
             customPresetFile:
-              workflowMode === "ripOnly" ? null : settings.customPresetFile,
+              pipelineMode === "ripOnly" ? null : settings.customPresetFile,
             customPresetName:
-              workflowMode === "ripOnly" ? null : settings.defaultPreset,
+              pipelineMode === "ripOnly" ? null : settings.defaultPreset,
             tempDir: effectiveTempDir,
             outputDir: effectiveOutputDir,
             keepTempMkv: settings.keepTempMkv,
@@ -1943,9 +2079,9 @@
       }
     }
 
-    // When in Encode Only with a specific Movie row selected, assign this match to THAT row
+    // When in Encode Only or Organize mode with a specific Movie row selected, assign this match to THAT row
     if (
-      workflowMode === "encodeOnly" &&
+      isLocalMode &&
       inspectedLocalFile &&
       item.kind === "movie" &&
       localVideoItems.some((f) => f.path === inspectedLocalFile)
@@ -2170,6 +2306,18 @@
       >
         Encode Only
       </button>
+
+      <button
+        type="button"
+        onclick={() => (workflowMode = "organizeOnly")}
+        class={`rounded-full border px-3 py-1 text-xs font-semibold transition ${
+          workflowMode === "organizeOnly"
+            ? "border-[#1C8EC0] bg-[#5BC0EB] text-[#1A1513] shadow-[0_1px_2px_rgba(0,0,0,0.08)]"
+            : "border-[#9CD9F5] bg-[#E6F6FD] text-[#0E5678] hover:bg-[#D1EFFB]"
+        }`}
+      >
+        Organize
+      </button>
     </div>
 
     <!-- Right: Preview Toggle + Unified Categorized Settings Dropdown -->
@@ -2282,10 +2430,18 @@
             type="button"
             onclick={() => void pickLocalVideoFolder()}
             disabled={!modeReady || identifyingFolder}
-            title="Pick a TV season or video folder to auto-identify show + episodes and batch encode"
+            title={isOrganizeMode
+              ? "Connect a movie or TV directory to look up metadata, rename files, and sort into folders"
+              : "Pick a TV season or video folder to auto-identify show + episodes and batch encode"}
             class="rounded-md bg-[#11824F] px-3 py-1 text-xs font-semibold text-white transition hover:bg-[#0D6E42] disabled:cursor-not-allowed disabled:bg-[#D6CFC3] disabled:text-[#7D716A]"
           >
-            {identifyingFolder ? "Identifying..." : "+ Add Folder"}
+            {#if identifyingFolder}
+              Identifying...
+            {:else if isOrganizeMode}
+              {sourceFolderPath ? "Switch Folder" : "+ Connect Folder"}
+            {:else}
+              + Add Folder
+            {/if}
           </button>
           <button
             type="button"
@@ -2300,10 +2456,10 @@
               type="button"
               onclick={() => void handleAutoIdentifyLoadedFiles()}
               disabled={identifyingFolder}
-              title="Auto-identify show and episode numbers via TVDB, TMDB, or free TVMaze"
+              title="Auto-identify movies, show, and episode numbers via IMDb, TVDB, TMDB, or free TVMaze"
               class="rounded-md border border-[#9CD9F5] bg-[#E6F6FD] px-2.5 py-1 text-xs font-semibold text-[#0E5678] transition hover:bg-[#D1EFFB] disabled:opacity-50"
             >
-              Auto-Identify
+              {isOrganizeMode ? "Re-Lookup" : "Auto-Identify"}
             </button>
           {/if}
         </div>
@@ -2383,15 +2539,29 @@
 
       <div class="h-4 w-px bg-[#E6E0D6]"></div>
 
-      <button
-        type="button"
-        onclick={() => openSettingsAt("storage")}
-        class="flex max-w-[260px] items-center gap-1.5 rounded-md border border-transparent px-2 py-1 text-[11px] text-[#61554F] transition hover:border-[#E6E0D6] hover:bg-white hover:text-[#1A1513]"
-        title={`Output folder: ${resolvedOutputDir}`}
-      >
-        <span class="font-semibold text-[#7D716A]">Output:</span>
-        <span class="truncate font-mono text-[#1A1513]">{resolvedOutputDir}</span>
-      </button>
+      {#if isOrganizeMode}
+        <button
+          type="button"
+          onclick={() => void pickLocalVideoFolder()}
+          class="flex max-w-[340px] items-center gap-1.5 rounded-md border border-transparent px-2 py-1 text-[11px] text-[#61554F] transition hover:border-[#E6E0D6] hover:bg-white hover:text-[#1A1513]"
+          title={sourceFolderPath || "Connect a folder to organize in place"}
+        >
+          <span class="font-semibold text-[#0E5678]">Connected:</span>
+          <span class="truncate font-mono text-[#1A1513]">
+            {sourceFolderPath || "No folder connected"}
+          </span>
+        </button>
+      {:else}
+        <button
+          type="button"
+          onclick={() => openSettingsAt("storage")}
+          class="flex max-w-[260px] items-center gap-1.5 rounded-md border border-transparent px-2 py-1 text-[11px] text-[#61554F] transition hover:border-[#E6E0D6] hover:bg-white hover:text-[#1A1513]"
+          title={`Output folder: ${resolvedOutputDir}`}
+        >
+          <span class="font-semibold text-[#7D716A]">Output:</span>
+          <span class="truncate font-mono text-[#1A1513]">{resolvedOutputDir}</span>
+        </button>
+      {/if}
     </div>
 
     <!-- Single Contextual Primary CTA + Missing CLI Shortcut -->
@@ -2415,6 +2585,10 @@
       >
         {#if queueingJobs}
           Queueing...
+        {:else if isOrganizeMode && selectedCount > 0}
+          Preview &amp; Organize {selectedCount} File{selectedCount === 1 ? "" : "s"} →
+        {:else if isOrganizeMode}
+          Organize Folder →
         {:else if selectedCount > 0 && workflowMode === "encodeOnly" && activeQualityProfile}
           Encode {selectedCount} ({shortResolutionLabel(activeQualityProfile.resolution)} {activeQualityProfile.delivery === "local" ? "Local" : "Remote"}) →
         {:else if selectedCount > 0}
@@ -2720,9 +2894,9 @@
     {/if}
   </section>
 
-  <!-- Row 4: Full-Width Clay Data Table + Toggleable Right Preview Drawer -->
+  <!-- Row 4: 2/3 Title Table + Toggleable 1/3 Right Preview Drawer -->
   <div class="flex min-h-0 flex-1 overflow-hidden">
-    <main class="flex min-w-0 flex-1 flex-col overflow-hidden bg-white">
+    <main class="flex min-w-0 flex-[2_1_0%] flex-col overflow-hidden bg-white">
       {#if queueActionError}
         <div
           class="flex shrink-0 items-center justify-between gap-3 border-b border-red-200 bg-red-50 px-5 py-2 text-xs text-red-700"
@@ -2737,7 +2911,59 @@
           </button>
         </div>
       {/if}
-      {#if workflowMode === "encodeOnly" && (folderIdentifyStatus || localVideoItems.length > 0)}
+      {#if lastOrganizeResult && isOrganizeMode}
+        <div
+          class="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-[#9BE5C1] bg-[#E6FBF1] px-5 py-2 text-xs text-[#0E4D31]"
+        >
+          <div class="flex min-w-0 items-center gap-2">
+            <span class="h-2 w-2 shrink-0 rounded-full bg-[#1FA868]"></span>
+            <span class="font-semibold">{lastOrganizeResult.statusMessage}</span>
+          </div>
+          <div class="flex shrink-0 items-center gap-2">
+            {#if sourceFolderPath}
+              <button
+                type="button"
+                onclick={() => void rescanConnectedFolder()}
+                disabled={identifyingFolder}
+                class="rounded border border-[#9BE5C1] bg-white px-2 py-0.5 text-[11px] font-semibold text-[#0E4D31] hover:bg-[#CEF6E3] disabled:opacity-50"
+              >
+                Rescan Folder
+              </button>
+            {/if}
+            {#if lastOrganizeResult.canUndo}
+              <button
+                type="button"
+                onclick={() => void handleUndoLastOrganize()}
+                disabled={undoingOrganize}
+                class="rounded border border-[#D68D1C] bg-[#FFF7E6] px-2.5 py-0.5 text-[11px] font-semibold text-[#5E3906] hover:bg-[#FDEBC4] disabled:opacity-50"
+              >
+                {undoingOrganize ? "Undoing..." : "↩ Undo Last Organize"}
+              </button>
+            {/if}
+            <button
+              type="button"
+              onclick={() => (lastOrganizeResult = null)}
+              class="text-[11px] font-semibold text-[#0E4D31]/80 hover:text-[#0E4D31]"
+            >
+              Dismiss
+            </button>
+          </div>
+        </div>
+      {:else if organizeUndoBanner && isOrganizeMode}
+        <div
+          class="flex shrink-0 items-center justify-between gap-2 border-b border-[#9CD9F5] bg-[#E6F6FD] px-5 py-2 text-xs text-[#0E5678]"
+        >
+          <span class="font-semibold">↩ {organizeUndoBanner}</span>
+          <button
+            type="button"
+            onclick={() => (organizeUndoBanner = null)}
+            class="text-[11px] font-semibold text-[#0E5678] hover:underline"
+          >
+            Dismiss
+          </button>
+        </div>
+      {/if}
+      {#if isLocalMode && (folderIdentifyStatus || localVideoItems.length > 0)}
         <div
           class="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-[#E6E0D6] bg-[#F7F4EE] px-5 py-1.5 text-[11px]"
         >
@@ -2755,6 +2981,10 @@
             {#if folderIdentifyStatus}
               <span class="truncate font-medium text-[#0E4D31]">
                 {folderIdentifyStatus}
+              </span>
+            {:else if isOrganizeMode}
+              <span class="text-[#61554F]">
+                Lookup &amp; reorganize in place · preserves original extensions &amp; companion <span class="font-mono text-[#1A1513]">.srt/.nfo</span> sidecars
               </span>
             {:else if activeQualityProfile}
               <span class="text-[#61554F]">
@@ -2798,7 +3028,7 @@
         </div>
       {/if}
       <!-- Table Header -->
-      {#if workflowMode === "encodeOnly"}
+      {#if isLocalMode}
         <div
           class="grid shrink-0 grid-cols-12 items-center border-b border-[#E6E0D6] bg-[#FAF8F4] px-5 py-2 text-[10px] font-bold uppercase tracking-[0.08em] text-[#7D716A]"
         >
@@ -2813,7 +3043,11 @@
             />
           </div>
           <div class="col-span-2">Type / Episode</div>
-          <div class="col-span-5">Source File → Uniform Output Name</div>
+          <div class="col-span-5">
+            {isOrganizeMode
+              ? "Current File → Organized Target Path"
+              : "Source File → Uniform Output Name"}
+          </div>
           <div class="col-span-2 text-right">Length / Size</div>
           <div class="col-span-2 text-right">Actions</div>
         </div>
@@ -2841,7 +3075,7 @@
 
       <!-- Scrollable Table Body -->
       <div class="flex-1 overflow-y-auto">
-        {#if workflowMode === "encodeOnly"}
+        {#if isLocalMode}
           {#if localVideoItems.length === 0}
             <div
               class="flex h-full flex-col items-center justify-center px-6 py-16 text-center"
@@ -2849,27 +3083,51 @@
               <div
                 class="mb-3 flex h-11 w-11 items-center justify-center rounded-full border border-[#E6E0D6] bg-[#FAF8F4] text-[#61554F]"
               >
-                <svg
-                  class="h-5 w-5"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="1.6"
-                  aria-hidden="true"
-                >
-                  <path d="M4 7a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7Z" />
-                  <path d="m10 9 5 3-5 3V9Z" />
-                </svg>
+                {#if isOrganizeMode}
+                  <svg
+                    class="h-5 w-5 text-[#0E5678]"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.6"
+                    aria-hidden="true"
+                  >
+                    <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z" />
+                    <path d="m9 14 2 2 4-4" />
+                  </svg>
+                {:else}
+                  <svg
+                    class="h-5 w-5"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.6"
+                    aria-hidden="true"
+                  >
+                    <path d="M4 7a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7Z" />
+                    <path d="m10 9 5 3-5 3V9Z" />
+                  </svg>
+                {/if}
               </div>
               <h2 class="text-sm font-bold tracking-[-0.01em] text-[#1A1513]">
-                Add a TV season folder or video files to batch encode
+                {isOrganizeMode
+                  ? "Connect a folder to look up, rename & reorganize"
+                  : "Add a TV season folder or video files to batch encode"}
               </h2>
               <p class="mt-1 max-w-md text-xs leading-relaxed text-[#7D716A]">
-                Drop in an entire folder of oversized <span class="font-mono text-[#1A1513]">.mkv</span>
-                or <span class="font-mono text-[#1A1513]">.mp4</span> episodes. RipDaddy
-                automatically identifies the show and episodes via TVDB/TMDB/TVMaze,
-                uniforms all filenames, generates trickplay frames, and encodes the whole
-                folder with one quality profile.
+                {#if isOrganizeMode}
+                  Already have the encodes you want? Connect any messy movie or TV
+                  directory — RipDaddy runs IMDb / TVDB / TMDB / TVMaze lookups,
+                  previews every rename and <span class="font-mono text-[#1A1513]">.srt/.nfo</span>
+                  sidecar, and reorganizes in place with one-click Undo. No MakeMKV
+                  or HandBrake required.
+                {:else}
+                  Drop in an entire folder of oversized <span class="font-mono text-[#1A1513]">.mkv</span>
+                  or <span class="font-mono text-[#1A1513]">.mp4</span> episodes. RipDaddy
+                  automatically identifies the show and episodes via TVDB/TMDB/TVMaze,
+                  uniforms all filenames, generates trickplay frames, and encodes the whole
+                  folder with one quality profile.
+                {/if}
               </p>
               <div class="mt-4 flex flex-wrap items-center justify-center gap-2">
                 <button
@@ -2878,7 +3136,13 @@
                   disabled={!modeReady || identifyingFolder}
                   class="rounded-md bg-[#11824F] px-4 py-2 text-xs font-semibold text-white transition hover:bg-[#0D6E42] disabled:cursor-not-allowed disabled:bg-[#D6CFC3] disabled:text-[#7D716A]"
                 >
-                  {identifyingFolder ? "Scanning Folder..." : "+ Add TV / Video Folder"}
+                  {#if identifyingFolder}
+                    Scanning Folder...
+                  {:else if isOrganizeMode}
+                    + Connect Folder to Organize
+                  {:else}
+                    + Add TV / Video Folder
+                  {/if}
                 </button>
                 <button
                   type="button"
@@ -3251,6 +3515,19 @@
     }}
     onConfirm={handleConfirmFolderOrganization}
     onCancel={() => (organizeModalOpen = false)}
+  />
+
+  <!-- Direct Folder Lookup, Dry-Run Review & Reorganize Modal (Organize mode) -->
+  <OrganizeReviewModal
+    open={organizeReviewOpen}
+    items={organizeFileRequests}
+    batchKind={activeBatchKind}
+    {namingConvention}
+    {sourceFolderPath}
+    defaultOutputDir={resolvedOutputDir === "Auto" ? "" : resolvedOutputDir}
+    recommendedOrg={recommendedFolderOrg}
+    onCompleted={handleOrganizeCompleted}
+    onClose={() => (organizeReviewOpen = false)}
   />
 
   <!-- First-Run Onboarding Modal (auto-skipped when both CLIs are already installed) -->

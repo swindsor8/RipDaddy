@@ -340,6 +340,92 @@ export interface MetadataProviderConfig {
 
 export type PipelineMode = "ripOnly" | "encodeOnly" | "ripAndEncode";
 
+export type WorkspaceMode = PipelineMode | "organizeOnly";
+
+// ---------------------------------------------------------------------------
+// Direct Folder Lookup, Rename & Reorganize (src-tauri/src/organize.rs)
+// ---------------------------------------------------------------------------
+
+export type OrganizeTransferMode = "move" | "copy";
+
+export interface OrganizeFileRequest {
+  sourcePath: string;
+  mediaMetadata: MediaMetadata;
+}
+
+export interface OrganizePlanRequest {
+  items: OrganizeFileRequest[];
+  destinationDir: string;
+  namingConvention: NamingConvention;
+  folderOrganization: FolderOrganization;
+  transferMode: OrganizeTransferMode;
+  includeSidecars: boolean;
+  pruneEmptyDirs: boolean;
+  sourceRootDir: string | null;
+}
+
+export type OrganizeItemStatus =
+  | "ready"
+  | "unchanged"
+  | "conflict"
+  | "missingSource";
+
+export interface PlannedSidecarOp {
+  sourcePath: string;
+  targetPath: string;
+  suffix: string;
+}
+
+export interface PlannedOrganizeItem {
+  sourcePath: string;
+  targetPath: string;
+  relativeTargetPath: string;
+  status: OrganizeItemStatus;
+  reason: string | null;
+  sidecars: PlannedSidecarOp[];
+}
+
+export interface OrganizePlan {
+  destinationDir: string;
+  transferMode: OrganizeTransferMode;
+  includeSidecars: boolean;
+  pruneEmptyDirs: boolean;
+  sourceRootDir: string | null;
+  items: PlannedOrganizeItem[];
+  readyCount: number;
+  unchangedCount: number;
+  conflictCount: number;
+  sidecarCount: number;
+}
+
+export interface CompletedFileOp {
+  sourcePath: string;
+  targetPath: string;
+  transferMode: OrganizeTransferMode;
+  isSidecar: boolean;
+}
+
+export interface OrganizeExecutionResult {
+  batchId: string;
+  transferMode: OrganizeTransferMode;
+  movedCount: number;
+  sidecarsMovedCount: number;
+  skippedCount: number;
+  failedCount: number;
+  prunedDirsCount: number;
+  canUndo: boolean;
+  operations: CompletedFileOp[];
+  errors: string[];
+  statusMessage: string;
+}
+
+export interface UndoOrganizeResult {
+  restoredCount: number;
+  failedCount: number;
+  errors: string[];
+  statusMessage: string;
+}
+
 export type JobStage =
   | "queuedForRip"
   | "ripping"
@@ -424,7 +510,7 @@ export type SettingsCategory =
 
 export interface AppSettings {
   // General
-  defaultMode: PipelineMode;
+  defaultMode: WorkspaceMode;
   autoSetupOnFirstRun: boolean;
   firstRunSetupDone: boolean;
   keepTempMkv: boolean;

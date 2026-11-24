@@ -9,16 +9,16 @@
   import type {
     DiscTitle,
     NamingConvention,
-    PipelineMode,
     PreviewFrame,
     QualityProfile,
     ResolutionTier,
     StreamTrack,
     TrickplayPreview,
+    WorkspaceMode,
   } from "./types";
 
   interface Props {
-    workflowMode: PipelineMode;
+    workflowMode: WorkspaceMode;
     selectedTitle: DiscTitle | null;
     selectedLocalFile: string | null;
     outputFilenamePreview: string;
@@ -59,6 +59,10 @@
 
   let activeFrameIndex = $state(0);
   let lightboxOpen = $state(false);
+
+  const isLocalMode = $derived(
+    workflowMode === "encodeOnly" || workflowMode === "organizeOnly",
+  );
 
   const frames = $derived(trickplay?.frames ?? []);
   const activeFrame = $derived<PreviewFrame | null>(
@@ -189,7 +193,7 @@
 
 <aside
   aria-label="Preview and inspector"
-  class="flex w-[360px] shrink-0 flex-col border-l border-[#E6E0D6] bg-white"
+  class="flex min-w-0 flex-[1_1_0%] flex-col border-l border-[#E6E0D6] bg-white"
 >
   <!-- Drawer Header -->
   <header
@@ -202,7 +206,7 @@
       <span
         class="rounded-full border border-[#E6E0D6] bg-[#FAF8F4] px-2 py-0.5 font-mono text-[10px] font-semibold text-[#61554F]"
       >
-        {#if workflowMode === "encodeOnly"}
+        {#if isLocalMode}
           {#if loadingTrickplay}
             Extracting...
           {:else if frames.length > 0}
@@ -217,7 +221,7 @@
     </div>
 
     <div class="flex items-center gap-1">
-      {#if workflowMode === "encodeOnly" && activeFrame}
+      {#if isLocalMode && activeFrame}
         <button
           type="button"
           onclick={() => (lightboxOpen = true)}
@@ -243,7 +247,7 @@
     <div
       class="group relative aspect-video w-full overflow-hidden rounded-lg border border-[#DAD3C7] bg-[#181311]"
     >
-      {#if workflowMode === "encodeOnly" && selectedLocalFile}
+      {#if isLocalMode && selectedLocalFile}
         {#if loadingTrickplay}
           <div
             class="flex h-full flex-col items-center justify-center gap-2 px-5 text-center"
@@ -251,7 +255,7 @@
             <div
               class="h-6 w-6 animate-spin rounded-full border-2 border-white/20 border-t-[#4CDE99]"
             ></div>
-            <p class="max-w-[260px] truncate text-xs font-semibold text-white">
+            <p class="max-w-full truncate text-xs font-semibold text-white">
               {fileBaseName(selectedLocalFile)}
             </p>
             <p class="font-mono text-[10px] text-[#9E928B]">
@@ -333,7 +337,7 @@
             >
               FRAME PREVIEW UNAVAILABLE
             </span>
-            <p class="max-w-[260px] truncate text-xs font-semibold text-white">
+            <p class="max-w-full truncate text-xs font-semibold text-white">
               {fileBaseName(selectedLocalFile)}
             </p>
             <p class="mt-1 text-[11px] leading-relaxed text-[#A89C95]">
@@ -352,7 +356,7 @@
           >
             TITLE #{selectedTitle.titleId} · {selectedTitle.duration ?? "--:--"}
           </span>
-          <p class="max-w-[260px] truncate text-xs font-semibold text-white">
+          <p class="max-w-full truncate text-xs font-semibold text-white">
             {selectedTitle.name ?? `Title #${selectedTitle.titleId}`}
           </p>
           <p class="mt-1 text-[11px] leading-relaxed text-[#A89C95]">
@@ -405,7 +409,7 @@
           </div>
           <p class="text-xs font-semibold text-white/90">No source selected</p>
           <p class="mt-1 text-[11px] leading-relaxed text-[#9E928B]">
-            {workflowMode === "encodeOnly"
+            {isLocalMode
               ? "Click any added video file in the table to auto-generate trickplay preview frames."
               : "Scan a disc and click any title row to inspect its streams and output path."}
           </p>
@@ -414,7 +418,7 @@
     </div>
 
     <!-- Interactive Trickplay Scrubber & 4x2 Thumbnail Filmstrip -->
-    {#if workflowMode === "encodeOnly" && selectedLocalFile && frames.length > 0}
+    {#if isLocalMode && selectedLocalFile && frames.length > 0}
       <div class="space-y-2">
         {#if frames.length > 1}
           <div class="flex items-center gap-2">
@@ -472,8 +476,8 @@
       </div>
     {/if}
 
-    <!-- Source Video Quality & Aspect Ratio Specs (Encode Only) -->
-    {#if workflowMode === "encodeOnly" && selectedLocalFile && trickplay}
+    <!-- Source Video Quality & Aspect Ratio Specs (Encode / Organize) -->
+    {#if isLocalMode && selectedLocalFile && trickplay}
       <div
         class="divide-y divide-[#EDE7DD] overflow-hidden rounded-lg border border-[#E6E0D6] text-xs"
       >
@@ -563,7 +567,11 @@
         <span
           class="rounded border border-[#E6E0D6] bg-white px-1.5 py-0.5 font-mono text-[10px] font-semibold text-[#1A1513]"
         >
-          .{workflowMode === "ripOnly" ? "mkv" : outputContainer}
+          .{workflowMode === "ripOnly"
+            ? "mkv"
+            : workflowMode === "organizeOnly" && selectedLocalFile
+              ? (selectedLocalFile.split(".").pop()?.toLowerCase() || "mkv")
+              : outputContainer}
         </span>
       </div>
       <p
@@ -575,7 +583,7 @@
     </div>
 
     <!-- Active Quality Profile Summary -->
-    {#if workflowMode !== "ripOnly" && activeQualityProfile}
+    {#if workflowMode !== "ripOnly" && workflowMode !== "organizeOnly" && activeQualityProfile}
       <div
         class="space-y-1.5 rounded-lg border border-[#E6E0D6] bg-[#F7F4EE] p-3"
       >
@@ -624,7 +632,7 @@
     {/if}
 
     <!-- Disc Title Specs (Rip Only / Rip + Encode) -->
-    {#if workflowMode !== "encodeOnly" && selectedTitle}
+    {#if !isLocalMode && selectedTitle}
       <div
         class="divide-y divide-[#EDE7DD] overflow-hidden rounded-lg border border-[#E6E0D6] text-xs"
       >
@@ -678,8 +686,8 @@
     {/if}
   </div>
 
-  <!-- Clean Trickplay Footer (Encode Only) -->
-  {#if workflowMode === "encodeOnly" && selectedLocalFile}
+  <!-- Clean Trickplay Footer (Encode / Organize) -->
+  {#if isLocalMode && selectedLocalFile}
     <footer
       class="flex items-center gap-2 border-t border-[#EDE7DE] bg-[#F7F4EE] p-3"
     >

@@ -3,6 +3,7 @@ pub mod folder_id;
 pub mod handbrake;
 pub mod makemkv;
 pub mod metadata;
+pub mod organize;
 pub mod pipeline;
 pub mod preview;
 
@@ -13,6 +14,10 @@ use makemkv::{DiscScanResult, OpticalDrive};
 use metadata::{
     DiscLabelGuess, EpisodeInfo, ExternalIds, FolderOrganization, MediaKind, MediaMetadata,
     MetadataProvider, MetadataProviderConfig, MetadataSearchQuery, NamingConvention,
+};
+use organize::{
+    OrganizeExecutionResult, OrganizePlan, OrganizePlanRequest, OrganizeUndoStore,
+    UndoOrganizeResult,
 };
 use pipeline::{EnqueueJobRequest, PipelineController, PipelineEvent, QueueJob};
 use preview::TrickplayPreview;
@@ -258,6 +263,38 @@ async fn fetch_series_episodes(
     .map_err(|err| err.to_string())
 }
 
+/// Builds a read-only dry-run reorganization & rename plan for already-encoded media files.
+#[tauri::command]
+async fn plan_organize_folder(request: OrganizePlanRequest) -> Result<OrganizePlan, String> {
+    tokio::task::spawn_blocking(move || organize::plan_organize(&request))
+        .await
+        .map_err(|err| format!("Organize planning task failed: {err}"))?
+}
+
+/// Executes a folder rename & reorganization pass (move or copy, optional sidecars & pruning)
+/// and records completed move operations for one-click Undo.
+#[tauri::command]
+async fn execute_organize_folder(
+    request: OrganizePlanRequest,
+    undo_state: tauri::State<'_, OrganizeUndoStore>,
+) -> Result<OrganizeExecutionResult, String> {
+    let store = undo_state.inner().clone();
+    tokio::task::spawn_blocking(move || organize::execute_organize(&request, Some(&store)))
+        .await
+        .map_err(|err| format!("Organize execution task failed: {err}"))?
+}
+
+/// Reverses the last completed Move reorganization pass back to original file paths.
+#[tauri::command]
+async fn undo_last_organize(
+    undo_state: tauri::State<'_, OrganizeUndoStore>,
+) -> Result<UndoOrganizeResult, String> {
+    let store = undo_state.inner().clone();
+    tokio::task::spawn_blocking(move || organize::undo_last_organize(&store))
+        .await
+        .map_err(|err| format!("Undo task failed: {err}"))?
+}
+
 /// Enqueues one or more RipOnly, EncodeOnly, or RipAndEncode jobs onto the live Tokio workers.
 #[tauri::command]
 async fn enqueue_jobs(
@@ -320,6 +357,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_store::Builder::default().build())
         .manage(PipelineController::new())
+        .manage(OrganizeUndoStore::new())
         .setup(|app| {
             app.state::<PipelineController>()
                 .start_workers(app.handle().clone());
@@ -343,6 +381,9 @@ pub fn run() {
             identify_video_folder,
             identify_video_files,
             fetch_series_episodes,
+            plan_organize_folder,
+            execute_organize_folder,
+            undo_last_organize,
             enqueue_jobs,
             get_queue,
             cancel_job,
