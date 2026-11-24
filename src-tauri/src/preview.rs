@@ -13,7 +13,7 @@
 
 use crate::detect::{self, ResolvedCommand};
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
@@ -463,19 +463,46 @@ async fn probe_with_ffprobe(ffprobe: &ResolvedCommand, input_path: &Path) -> Opt
 
 /// Fast lightweight runtime probe (`~20–40ms`) using `ffprobe` container metadata only
 /// (requires zero video decoding, so it works on all codecs even with Fedora `ffmpeg-free`).
-pub async fn probe_video_duration_seconds(
+/// Fast container-header probe (duration + embedded title/show/season/episode tags)
+/// extracted in a single ~20ms `ffprobe` call without decoding any video frames.
+#[derive(Debug, Clone, Default)]
+pub struct QuickContainerProbe {
+    pub duration_seconds: Option<f64>,
+    pub title_tag: Option<String>,
+    pub show_tag: Option<String>,
+    pub season_tag: Option<u32>,
+    pub episode_tag: Option<u32>,
+}
+
+fn parse_first_uint(raw: &str) -> Option<u32> {
+    let digits: String = raw
+        .trim()
+        .chars()
+        .skip_while(|c| !c.is_ascii_digit())
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    if digits.is_empty() {
+        None
+    } else {
+        digits.parse::<u32>().ok()
+    }
+}
+
+/// Probes container duration and embedded media tags (`title`, `show`, `season_number`,
+/// `episode_sort`, `episode_id`) in one fast header-only `ffprobe` pass.
+pub async fn probe_video_quick_info(
     ffprobe: &ResolvedCommand,
     input_path: &Path,
-) -> Option<f64> {
+) -> QuickContainerProbe {
     let mut cmd = Command::new(&ffprobe.program);
     cmd.args(&ffprobe.prefix_args)
         .args([
             "-v",
             "error",
             "-show_entries",
-            "format=duration",
+            "format=duration:format_tags=title,show,season_number,episode_sort,episode_id,album",
             "-of",
-            "default=noprint_wrappers=1:nokey=1",
+            "json",
         ])
         .arg(input_path)
         .stdin(Stdio::null())
@@ -484,19 +511,72 @@ pub async fn probe_video_duration_seconds(
         .kill_on_drop(true);
     configure_platform_command(&mut cmd);
 
-    let child = cmd.spawn().ok()?;
-    let output = timeout(Duration::from_secs(6), child.wait_with_output())
-        .await
-        .ok()?
-        .ok()?;
+    let Ok(child) = cmd.spawn() else {
+        return QuickContainerProbe::default();
+    };
+    let Ok(Ok(output)) = timeout(Duration::from_secs(6), child.wait_with_output()).await else {
+        return QuickContainerProbe::default();
+    };
     if !output.status.success() {
-        return None;
+        return QuickContainerProbe::default();
     }
-    String::from_utf8_lossy(&output.stdout)
-        .trim()
-        .parse::<f64>()
-        .ok()
-        .filter(|v| v.is_finite() && *v > 0.0)
+
+    let Ok(json) = serde_json::from_slice::<serde_json::Value>(&output.stdout) else {
+        return QuickContainerProbe::default();
+    };
+    let Some(fmt) = json.get("format") else {
+        return QuickContainerProbe::default();
+    };
+
+    let duration_seconds = fmt
+        .get("duration")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.trim().parse::<f64>().ok())
+        .filter(|v| v.is_finite() && *v > 0.0);
+
+    let tags = fmt.get("tags").and_then(|v| v.as_object());
+    let get_tag = |keys: &[&str]| -> Option<String> {
+        let map = tags?;
+        for wanted in keys {
+            for (k, v) in map {
+                if k.eq_ignore_ascii_case(wanted) {
+                    if let Some(s) = v.as_str() {
+                        let t = s.trim();
+                        if !t.is_empty() {
+                            return Some(t.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        None
+    };
+
+    let title_tag = get_tag(&["title"]);
+    let show_tag = get_tag(&["show", "series"]);
+    let season_tag = get_tag(&["season_number", "season"]).and_then(|s| parse_first_uint(&s));
+    let episode_tag =
+        get_tag(&["episode_sort", "episode_id", "episode", "track"]).and_then(|s| {
+            let n = parse_first_uint(&s)?;
+            (1..=500).contains(&n).then_some(n)
+        });
+
+    QuickContainerProbe {
+        duration_seconds,
+        title_tag,
+        show_tag,
+        season_tag,
+        episode_tag,
+    }
+}
+
+pub async fn probe_video_duration_seconds(
+    ffprobe: &ResolvedCommand,
+    input_path: &Path,
+) -> Option<f64> {
+    probe_video_quick_info(ffprobe, input_path)
+        .await
+        .duration_seconds
 }
 
 async fn probe_with_handbrake(

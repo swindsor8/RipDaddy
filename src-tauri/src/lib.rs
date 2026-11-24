@@ -8,7 +8,7 @@ pub mod pipeline;
 pub mod preview;
 
 use detect::{AutoSetupResult, BinariesCheckResult, BinaryKind, BinaryPathsConfig};
-use folder_id::FolderIdentifyResult;
+use folder_id::{FolderIdentifyResult, IdentifiedVideoFile};
 use handbrake::{HandBrakePreset, QualityProfile};
 use makemkv::{DiscScanResult, OpticalDrive};
 use metadata::{
@@ -263,6 +263,24 @@ async fn fetch_series_episodes(
     .map_err(|err| err.to_string())
 }
 
+/// Re-parses and fuzzy-matches loaded local video files against a chosen TV show and episode
+/// catalog (used when switching a misclassified folder to TV or selecting a show manually).
+#[tauri::command]
+async fn rematch_tv_files(
+    file_paths: Vec<String>,
+    show_title: String,
+    episodes_catalog: Vec<EpisodeInfo>,
+    default_season: Option<u32>,
+) -> Vec<IdentifiedVideoFile> {
+    folder_id::rematch_files_to_series(
+        &file_paths,
+        &show_title,
+        &episodes_catalog,
+        default_season,
+    )
+    .await
+}
+
 /// Builds a read-only dry-run reorganization & rename plan for already-encoded media files.
 #[tauri::command]
 async fn plan_organize_folder(request: OrganizePlanRequest) -> Result<OrganizePlan, String> {
@@ -381,6 +399,7 @@ pub fn run() {
             identify_video_folder,
             identify_video_files,
             fetch_series_episodes,
+            rematch_tv_files,
             plan_organize_folder,
             execute_organize_folder,
             undo_last_organize,

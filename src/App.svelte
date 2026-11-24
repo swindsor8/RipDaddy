@@ -918,8 +918,15 @@
       item.fileName.replace(/\.[^.]+$/, "");
     const tvYear =
       sharedTvShow?.year ?? (mediaKind === "tvEpisode" ? parsedYear : null);
+    const tvIds: ExternalIds = sharedTvShow?.ids ?? {
+      imdbId: imdbId.trim() || null,
+      tvdbId: tvdbId.trim() || null,
+      tmdbId: tmdbId.trim() || null,
+    };
     const baseTitle = sanitizeClientFilename(tvTitle) || "Untitled";
     const titleWithYear = tvYear ? `${baseTitle} (${tvYear})` : baseTitle;
+    const tvTag = formatProviderTagFor("tvEpisode", tvIds, namingConvention);
+    const taggedShowDir = tvTag ? `${titleWithYear} ${tvTag}` : titleWithYear;
     const s = item.season ?? parsedSeason;
     const e = item.episode ?? parsedStartEpisode + rowIndex;
     const seasonPad = String(s).padStart(2, "0");
@@ -933,7 +940,10 @@
     if (effectivePreviewFolderOrg === "flat") {
       return file;
     }
-    return `Season ${seasonPad}/${file}`;
+    if (effectivePreviewFolderOrg === "seasonOnly") {
+      return `Season ${seasonPad}/${file}`;
+    }
+    return `${taggedShowDir}/Season ${seasonPad}/${file}`;
   }
 
   function syncMetadataStripToItem(item: IdentifiedVideoFile): void {
@@ -1157,6 +1167,44 @@
     } finally {
       identifyingFolder = false;
     }
+  }
+
+  function assignOfficialEpisodeToItem(
+    path: string,
+    encodedSe: string,
+  ): void {
+    const [sStr, eStr] = encodedSe.split(":");
+    const s = Number.parseInt(sStr, 10);
+    const e = Number.parseInt(eStr, 10);
+    if (!Number.isFinite(s) || !Number.isFinite(e)) return;
+    const official = seriesEpisodeCatalog.find(
+      (ep) => ep.season === s && ep.episode === e,
+    );
+    if (!official) return;
+    localVideoItems = localVideoItems.map((item) =>
+      item.path === path
+        ? {
+            ...item,
+            mediaKind: "tvEpisode",
+            season: official.season,
+            episode: official.episode,
+            episodeTitle: official.title,
+            matchedFromCatalog: true,
+          }
+        : item,
+    );
+  }
+
+  function updateItemEpisodeTitle(path: string, rawTitle: string): void {
+    const cleaned = rawTitle.trim();
+    localVideoItems = localVideoItems.map((item) =>
+      item.path === path
+        ? {
+            ...item,
+            episodeTitle: cleaned.length > 0 ? cleaned : null,
+          }
+        : item,
+    );
   }
 
   function updateItemSeasonOrEpisode(
@@ -2109,47 +2157,161 @@
     }
 
     // When picking a TV show with local files loaded, update shared TV identity,
-    // fetch official episode titles, and re-apply uniform episode naming across TV rows.
+    // convert misclassified rows if needed, fetch official episodes, and fuzzy-rematch.
     if (item.kind === "tvEpisode") {
-      sharedTvShow = {
+      await applySeriesSelectionToLocalFiles({
         ...item,
         ids: {
           imdbId: imdbId.trim() || null,
           tvdbId: tvdbId.trim() || null,
           tmdbId: tmdbId.trim() || null,
         },
-      };
-      const tvRows = localVideoItems.filter((f) => f.mediaKind === "tvEpisode");
-      if (tvRows.length > 0) {
-        try {
-          const seasonsHint = Array.from(
-            new Set(
-              tvRows
-                .map((f) => f.season)
-                .filter((s): s is number => s !== null),
-            ),
-          );
-          const [prov, episodes] = await invoke<
-            [MetadataProvider, EpisodeInfo[]]
-          >("fetch_series_episodes", {
-            title: item.title,
-            ids: sharedTvShow.ids,
-            seasonsHint: seasonsHint.length > 0 ? seasonsHint : [parsedSeason],
-            config: currentMetadataConfig(),
-          });
-          applyEpisodeCatalogToItems(episodes);
-          const matchedCount = localVideoItems.filter(
-            (f) => f.mediaKind === "tvEpisode" && f.matchedFromCatalog,
-          ).length;
-          folderIdentifyStatus = `Matched "${item.title}" via ${prov.toUpperCase()} · ${matchedCount}/${tvRows.length} episodes matched`;
-        } catch {
-          // Keep user's show selection even if episode catalog lookup fails.
-        }
-      }
+      });
     }
   }
 
   function handleTitleInputKeydown(event: KeyboardEvent): void {
+
+  async function setAllLocalMediaKind(targetKind: MediaKind): Promise<void> {
+    if (localVideoItems.length === 0) return;
+    mediaKind = targetKind;
+    detectedFolderKind = targetKind === "tvEpisode" ? "tvSeries" : "movies";
+
+    if (targetKind === "tvEpisode") {
+      // If a TV show & episode catalog are already matched, immediately run Rust fuzzy rematch!
+      if (sharedTvShow && seriesEpisodeCatalog.length > 0) {
+        try {
+          const rematched = await invoke<IdentifiedVideoFile[]>(
+            "rematch_tv_files",
+            {
+              filePaths: localVideoItems.map((f) => f.path),
+              showTitle: sharedTvShow.title,
+              episodesCatalog: seriesEpisodeCatalog,
+              defaultSeason: parsedSeason,
+            },
+          );
+          if (rematched.length > 0) {
+            localVideoItems = rematched;
+            const matchedCount = rematched.filter(
+              (f) => f.matchedFromCatalog,
+            ).length;
+            folderIdentifyStatus = `Matched "${sharedTvShow.title}" · ${matchedCount}/${rematched.length} episodes matched`;
+            return;
+          }
+        } catch {
+          // Fall back to local kind conversion below
+        }
+      }
+
+      localVideoItems = localVideoItems.map((item, idx) => ({
+        ...item,
+        mediaKind: "tvEpisode",
+        season: item.season ?? parsedSeason,
+        episode: item.episode ?? parsedStartEpisode + idx,
+        needsTitle: false,
+      }));
+      folderIdentifyStatus = `Switched all ${localVideoItems.length} files to TV episodes — search a show above to auto-match episode titles.`;
+    } else {
+      localVideoItems = localVideoItems.map((item) => ({
+        ...item,
+        mediaKind: "movie",
+        season: null,
+        episode: null,
+        needsTitle: !item.movieMetadata,
+      }));
+      folderIdentifyStatus = `Switched all ${localVideoItems.length} files to Movies.`;
+    }
+
+    const active = localVideoItems.find((i) => i.path === inspectedLocalFile);
+    if (active) {
+      syncMetadataStripToItem(active);
+    }
+  }
+
+  // When picking a TV show with local files loaded, update shared TV identity,
+  // convert misclassified Movie rows to TV if needed, fetch official episode titles,
+  // and run Rust's fuzzy multi-season rematch across the rows!
+  async function applySeriesSelectionToLocalFiles(
+    show: MediaMetadata,
+  ): Promise<void> {
+    sharedTvShow = show;
+    if (localVideoItems.length === 0) return;
+
+    const existingTv = localVideoItems.filter(
+      (f) => f.mediaKind === "tvEpisode",
+    );
+    const convertAll = existingTv.length === 0;
+    const targetRows = convertAll ? localVideoItems : existingTv;
+    if (convertAll) {
+      detectedFolderKind = "tvSeries";
+    }
+
+    try {
+      const seasonsHint = Array.from(
+        new Set(
+          targetRows
+            .map((f) => f.season)
+            .filter((s): s is number => s !== null),
+        ),
+      );
+      const [prov, episodes] = await invoke<[MetadataProvider, EpisodeInfo[]]>(
+        "fetch_series_episodes",
+        {
+          title: show.title,
+          ids: show.ids,
+          seasonsHint: seasonsHint.length > 0 ? seasonsHint : [parsedSeason],
+          config: currentMetadataConfig(),
+        },
+      );
+      seriesEpisodeCatalog = episodes;
+
+      // Use Rust's full container-tag + sibling + fuzzy Levenshtein multi-season matcher
+      const rematched = await invoke<IdentifiedVideoFile[]>("rematch_tv_files", {
+        filePaths: targetRows.map((f) => f.path),
+        showTitle: show.title,
+        episodesCatalog: episodes,
+        defaultSeason: parsedSeason,
+      });
+
+      if (rematched.length > 0) {
+        if (convertAll) {
+          localVideoItems = rematched;
+        } else {
+          const byPath = new Map(rematched.map((f) => [f.path, f]));
+          localVideoItems = localVideoItems.map((row) =>
+            byPath.get(row.path) ?? row,
+          );
+        }
+      } else {
+        if (convertAll) {
+          localVideoItems = localVideoItems.map((row, idx) => ({
+            ...row,
+            mediaKind: "tvEpisode",
+            season: row.season ?? parsedSeason,
+            episode: row.episode ?? parsedStartEpisode + idx,
+            needsTitle: false,
+          }));
+        }
+        applyEpisodeCatalogToItems(episodes);
+      }
+
+      const tvAfter = localVideoItems.filter(
+        (f) => f.mediaKind === "tvEpisode",
+      );
+      const matchedCount = tvAfter.filter((f) => f.matchedFromCatalog).length;
+      folderIdentifyStatus = `Matched "${show.title}" via ${prov.toUpperCase()} · ${matchedCount}/${tvAfter.length} episodes matched`;
+    } catch {
+      if (convertAll) {
+        localVideoItems = localVideoItems.map((row, idx) => ({
+          ...row,
+          mediaKind: "tvEpisode",
+          season: row.season ?? parsedSeason,
+          episode: row.episode ?? parsedStartEpisode + idx,
+          needsTitle: false,
+        }));
+      }
+    }
+  }
     if (event.key === "Enter") {
       event.preventDefault();
       void handleMetadataSearch();
@@ -2701,6 +2863,56 @@
             title="Starting episode number (rows auto-increment)"
             class="w-10 rounded-md border border-[#DAD3C7] bg-[#F7F4EE] px-1.5 py-1 text-center font-mono text-xs text-[#1A1513] outline-none focus:border-[#1A1513] focus:bg-white"
           />
+          {#if isLocalMode && inspectedLocalItem && inspectedLocalItem.mediaKind === "tvEpisode"}
+            {#if seriesEpisodeCatalog.length > 0}
+              <label for="selected-ep-picker" class="sr-only">
+                Pick official episode for selected file
+              </label>
+              <select
+                id="selected-ep-picker"
+                value={inspectedLocalItem.season !== null &&
+                inspectedLocalItem.episode !== null
+                  ? `${inspectedLocalItem.season}:${inspectedLocalItem.episode}`
+                  : ""}
+                onchange={(e) => {
+                  if (inspectedLocalItem) {
+                    assignOfficialEpisodeToItem(
+                      inspectedLocalItem.path,
+                      e.currentTarget.value,
+                    );
+                  }
+                }}
+                title="Pick the exact official episode from the show catalog for the selected row"
+                class="max-w-[220px] truncate rounded-md border border-[#9CD9F5] bg-[#E6F6FD] px-2 py-1 text-[11px] font-semibold text-[#0E5678] outline-none focus:border-[#11824F]"
+              >
+                <option value="">Pick official episode...</option>
+                {#each seriesEpisodeCatalog as ep (`${ep.season}:${ep.episode}`)}
+                  <option value={`${ep.season}:${ep.episode}`}>
+                    S{String(ep.season).padStart(2, "0")}E{String(ep.episode).padStart(2, "0")} · {ep.title}
+                  </option>
+                {/each}
+              </select>
+            {:else}
+              <label for="selected-ep-title" class="sr-only">
+                Episode title for selected file
+              </label>
+              <input
+                id="selected-ep-title"
+                type="text"
+                value={inspectedLocalItem.episodeTitle ?? ""}
+                onchange={(e) => {
+                  if (inspectedLocalItem) {
+                    updateItemEpisodeTitle(
+                      inspectedLocalItem.path,
+                      e.currentTarget.value,
+                    );
+                  }
+                }}
+                placeholder="Episode name"
+                class="w-36 rounded-md border border-[#DAD3C7] bg-[#F7F4EE] px-2 py-1 text-xs text-[#1A1513] placeholder:text-[#A1958E] outline-none focus:border-[#1A1513] focus:bg-white"
+              />
+            {/if}
+          {/if}
         </div>
       {/if}
 
@@ -2997,6 +3209,38 @@
           </div>
 
           <div class="flex shrink-0 items-center gap-1.5">
+            {#if localVideoItems.length > 0}
+              <div
+                class="inline-flex rounded border border-[#DAD3C7] bg-white p-0.5 text-[10px]"
+                role="group"
+                aria-label="Set media type for all loaded files"
+              >
+                <button
+                  type="button"
+                  onclick={() => void setAllLocalMediaKind("tvEpisode")}
+                  title="Mark all loaded files as TV episodes"
+                  class={`rounded px-1.5 py-0.5 font-semibold transition ${
+                    activeBatchKind === "tvSeries"
+                      ? "bg-[#5BC0EB] text-[#1A1513]"
+                      : "text-[#61554F] hover:text-[#1A1513]"
+                  }`}
+                >
+                  All TV
+                </button>
+                <button
+                  type="button"
+                  onclick={() => void setAllLocalMediaKind("movie")}
+                  title="Mark all loaded files as Movies"
+                  class={`rounded px-1.5 py-0.5 font-semibold transition ${
+                    activeBatchKind === "movies"
+                      ? "bg-[#4CDE99] text-[#1A1513]"
+                      : "text-[#61554F] hover:text-[#1A1513]"
+                  }`}
+                >
+                  All Movies
+                </button>
+              </div>
+            {/if}
             {#if mediaKind === "tvEpisode" && detectedBatchSeasons.length > 1}
               <span
                 class="rounded-full border border-[#9CD9F5] bg-[#E6F6FD] px-2 py-0.5 font-mono text-[10px] font-semibold text-[#0E5678]"

@@ -1015,16 +1015,92 @@ async fn search_tvmaze(
     Ok(parse_tvmaze_response(&json))
 }
 
+/// Builds progressive fallback search queries from a potentially messy title
+/// (e.g. `"Breaking Bad Messy Copy"` -> `["Breaking Bad Messy Copy", "Breaking Bad Messy", "Breaking Bad"]`).
+fn build_fuzzy_query_variants(raw: &str) -> Vec<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+    let mut out = vec![trimmed.to_string()];
+
+    // Also try normalizing punctuation/camelCase boundaries into spaces
+    let mut spaced = String::with_capacity(trimmed.len() + 8);
+    let chars: Vec<char> = trimmed.chars().collect();
+    for (i, &ch) in chars.iter().enumerate() {
+        if i > 0
+            && ch.is_ascii_uppercase()
+            && chars[i - 1].is_ascii_lowercase()
+        {
+            spaced.push(' ');
+        }
+        if ch.is_ascii_alphanumeric() || ch == '\'' || ch == ' ' {
+            spaced.push(ch);
+        } else {
+            spaced.push(' ');
+        }
+    }
+    let cleaned = spaced.split_whitespace().collect::<Vec<_>>().join(" ");
+    if !cleaned.is_empty() && !cleaned.eq_ignore_ascii_case(trimmed) {
+        out.push(cleaned.clone());
+    }
+
+    let words: Vec<&str> = cleaned.split_whitespace().collect();
+    if words.len() >= 3 {
+        // Progressively trim up to 2 noisy trailing tokens (keeping at least 2 words)
+        for drop in 1..=2 {
+            if words.len() > drop + 1 {
+                let candidate = words[..words.len() - drop].join(" ");
+                if !out.iter().any(|v| v.eq_ignore_ascii_case(&candidate)) {
+                    out.push(candidate);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Sorts search candidates so exact normalized title matches (and optional year matches)
+/// rank ahead of spin-offs/substrings (e.g. `"Mickey Mouse"` ahead of `"Mickey Mouse Clubhouse"`).
+fn rank_candidates_for_query(results: &mut [MediaMetadata], query: &str, year: Option<u16>) {
+    let norm = |s: &str| -> String {
+        s.chars()
+            .filter(|c| c.is_ascii_alphanumeric() || c.is_whitespace())
+            .collect::<String>()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_ascii_lowercase()
+    };
+    let q_norm = norm(query);
+    results.sort_by_key(|m| {
+        let t_norm = norm(&m.title);
+        let title_rank: u8 = if t_norm == q_norm {
+            0
+        } else if t_norm.starts_with(&q_norm) {
+            1
+        } else {
+            2
+        };
+        let year_rank: u8 = match year {
+            Some(y) if m.year == Some(y) => 0,
+            Some(_) => 1,
+            None => 0,
+        };
+        (title_rank, year_rank)
+    });
+}
+
 /// Automatically searches the best available metadata service for a TV series
 /// (TVDB v4 if key is configured -> TMDB if key is configured -> keyless TVMaze fallback),
-/// returning `(provider_used, candidates)`.
+/// retrying progressively cleaned query variants when a messy folder/file name misses.
 pub async fn auto_search_tv_series(
     query: &str,
     year: Option<u16>,
     config: &MetadataProviderConfig,
 ) -> Result<(MetadataProvider, Vec<MediaMetadata>), MetadataError> {
-    let trimmed = query.trim();
-    if trimmed.is_empty() {
+    let variants = build_fuzzy_query_variants(query);
+    if variants.is_empty() {
         return Err(MetadataError::InvalidInput(
             "Could not infer a show title from the selected folder or filenames.".to_string(),
         ));
@@ -1032,59 +1108,66 @@ pub async fn auto_search_tv_series(
 
     let client = build_http_client()?;
 
-    // 1. Prefer TVDB v4 if user configured a TVDB key
-    if let Some(tvdb_key) = config
-        .tvdb_api_key
-        .as_deref()
-        .map(str::trim)
-        .filter(|k| !k.is_empty())
-    {
-        if let Ok(results) =
-            search_tvdb(&client, trimmed, year, MediaKind::TvEpisode, tvdb_key).await
-        {
-            if !results.is_empty() {
-                return Ok((MetadataProvider::Tvdb, results));
-            }
-        }
-    }
+    for (variant_idx, candidate_query) in variants.iter().enumerate() {
+        let year_try = if variant_idx == 0 { year } else { None };
 
-    // 2. Try TMDB if user configured a TMDB key/token
-    if let Some(tmdb_key) = config
-        .tmdb_api_key
-        .as_deref()
-        .map(str::trim)
-        .filter(|k| !k.is_empty())
-    {
-        if let Ok(mut results) =
-            search_tmdb(&client, trimmed, year, MediaKind::TvEpisode, tmdb_key).await
+        // 1. Prefer TVDB v4 if user configured a TVDB key
+        if let Some(tvdb_key) = config
+            .tvdb_api_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|k| !k.is_empty())
         {
-            if !results.is_empty() {
-                // Hydrate top candidate with TVDB + IMDb external IDs
-                if let Some(tmdb_id) = results[0].ids.tmdb_id.clone() {
-                    if let Ok(ext) =
-                        fetch_tmdb_external_ids(MediaKind::TvEpisode, &tmdb_id, config.clone())
-                            .await
-                    {
-                        results[0].ids = ext;
-                    }
+            if let Ok(mut results) =
+                search_tvdb(&client, candidate_query, year_try, MediaKind::TvEpisode, tvdb_key)
+                    .await
+            {
+                if !results.is_empty() {
+                    rank_candidates_for_query(&mut results, candidate_query, year);
+                    return Ok((MetadataProvider::Tvdb, results));
                 }
-                return Ok((MetadataProvider::Tmdb, results));
+            }
+        }
+
+        // 2. Try TMDB if user configured a TMDB key/token
+        if let Some(tmdb_key) = config
+            .tmdb_api_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|k| !k.is_empty())
+        {
+            if let Ok(mut results) =
+                search_tmdb(&client, candidate_query, year_try, MediaKind::TvEpisode, tmdb_key)
+                    .await
+            {
+                if !results.is_empty() {
+                    rank_candidates_for_query(&mut results, candidate_query, year);
+                    if let Some(tmdb_id) = results[0].ids.tmdb_id.clone() {
+                        if let Ok(ext) = fetch_tmdb_external_ids(
+                            MediaKind::TvEpisode,
+                            &tmdb_id,
+                            config.clone(),
+                        )
+                        .await
+                        {
+                            results[0].ids = ext;
+                        }
+                    }
+                    return Ok((MetadataProvider::Tmdb, results));
+                }
+            }
+        }
+
+        // 3. Always-available keyless TVMaze fallback (includes TVDB + IMDb external IDs!)
+        if let Ok(mut tvmaze_results) = search_tvmaze(&client, candidate_query).await {
+            if !tvmaze_results.is_empty() {
+                rank_candidates_for_query(&mut tvmaze_results, candidate_query, year);
+                return Ok((MetadataProvider::Tvmaze, tvmaze_results));
             }
         }
     }
 
-    // 3. Always-available keyless TVMaze fallback (includes TVDB + IMDb external IDs!)
-    let mut tvmaze_results = search_tvmaze(&client, trimmed).await?;
-    // Prefer exact/year-matching show at index 0 when year hint is present
-    if let Some(target_year) = year {
-        if let Some(pos) = tvmaze_results.iter().position(|m| m.year == Some(target_year)) {
-            if pos > 0 {
-                let matched = tvmaze_results.remove(pos);
-                tvmaze_results.insert(0, matched);
-            }
-        }
-    }
-    Ok((MetadataProvider::Tvmaze, tvmaze_results))
+    Ok((MetadataProvider::Tvmaze, Vec::new()))
 }
 
 /// Automatically searches the best available metadata service for a feature film:
@@ -1095,8 +1178,8 @@ pub async fn auto_search_movie(
     year: Option<u16>,
     config: &MetadataProviderConfig,
 ) -> Result<(MetadataProvider, Vec<MediaMetadata>), MetadataError> {
-    let trimmed = query.trim();
-    if trimmed.is_empty() {
+    let variants = build_fuzzy_query_variants(query);
+    if variants.is_empty() {
         return Err(MetadataError::InvalidInput(
             "Could not infer a movie title from filename.".to_string(),
         ));
@@ -1104,71 +1187,81 @@ pub async fn auto_search_movie(
 
     let client = build_http_client()?;
 
-    // 1. OMDb (IMDb) if configured
-    if let Some(omdb_key) = config
-        .omdb_api_key
-        .as_deref()
-        .map(str::trim)
-        .filter(|k| !k.is_empty())
-    {
-        if let Ok(results) =
-            search_omdb(&client, trimmed, year, MediaKind::Movie, omdb_key).await
+    for (variant_idx, candidate_query) in variants.iter().enumerate() {
+        let year_try = if variant_idx == 0 { year } else { None };
+
+        // 1. OMDb (IMDb) if configured
+        if let Some(omdb_key) = config
+            .omdb_api_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|k| !k.is_empty())
         {
+            if let Ok(results) =
+                search_omdb(&client, candidate_query, year_try, MediaKind::Movie, omdb_key).await
+            {
+                if !results.is_empty() {
+                    return Ok((MetadataProvider::Imdb, results));
+                }
+            }
+        }
+
+        // 2. TMDB if configured (+ hydrate IMDb ID on top match)
+        if let Some(tmdb_key) = config
+            .tmdb_api_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|k| !k.is_empty())
+        {
+            if let Ok(mut results) =
+                search_tmdb(&client, candidate_query, year_try, MediaKind::Movie, tmdb_key).await
+            {
+                if !results.is_empty() {
+                    if let Some(tmdb_id) = results[0].ids.tmdb_id.clone() {
+                        if let Ok(ext) =
+                            fetch_tmdb_external_ids(MediaKind::Movie, &tmdb_id, config.clone())
+                                .await
+                        {
+                            results[0].ids = ext;
+                        }
+                    }
+                    return Ok((MetadataProvider::Tmdb, results));
+                }
+            }
+        }
+
+        // 3. TVDB v4 movies if configured
+        if let Some(tvdb_key) = config
+            .tvdb_api_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|k| !k.is_empty())
+        {
+            if let Ok(results) =
+                search_tvdb(&client, candidate_query, year_try, MediaKind::Movie, tvdb_key).await
+            {
+                if !results.is_empty() {
+                    return Ok((MetadataProvider::Tvdb, results));
+                }
+            }
+        }
+
+        // 4. Keyless IMDb public suggestion endpoint (returns canonical title, year, tt-ID, poster)
+        if let Ok(results) = search_imdb_public_suggestions(&client, candidate_query, year).await {
             if !results.is_empty() {
                 return Ok((MetadataProvider::Imdb, results));
             }
         }
-    }
 
-    // 2. TMDB if configured (+ hydrate IMDb ID on top match)
-    if let Some(tmdb_key) = config
-        .tmdb_api_key
-        .as_deref()
-        .map(str::trim)
-        .filter(|k| !k.is_empty())
-    {
-        if let Ok(mut results) =
-            search_tmdb(&client, trimmed, year, MediaKind::Movie, tmdb_key).await
-        {
-            if !results.is_empty() {
-                if let Some(tmdb_id) = results[0].ids.tmdb_id.clone() {
-                    if let Ok(ext) =
-                        fetch_tmdb_external_ids(MediaKind::Movie, &tmdb_id, config.clone()).await
-                    {
-                        results[0].ids = ext;
-                    }
-                }
-                return Ok((MetadataProvider::Tmdb, results));
+        // 5. Keyless Apple iTunes movie catalog fallback
+        if let Ok(itunes_results) = search_itunes_movies(&client, candidate_query, year).await {
+            if !itunes_results.is_empty() {
+                return Ok((MetadataProvider::Imdb, itunes_results));
             }
         }
     }
 
-    // 3. TVDB v4 movies if configured
-    if let Some(tvdb_key) = config
-        .tvdb_api_key
-        .as_deref()
-        .map(str::trim)
-        .filter(|k| !k.is_empty())
-    {
-        if let Ok(results) =
-            search_tvdb(&client, trimmed, year, MediaKind::Movie, tvdb_key).await
-        {
-            if !results.is_empty() {
-                return Ok((MetadataProvider::Tvdb, results));
-            }
-        }
-    }
-
-    // 4. Keyless IMDb public suggestion endpoint (returns canonical title, year, tt-ID, poster)
-    if let Ok(results) = search_imdb_public_suggestions(&client, trimmed, year).await {
-        if !results.is_empty() {
-            return Ok((MetadataProvider::Imdb, results));
-        }
-    }
-
-    // 5. Keyless Apple iTunes movie catalog fallback
-    let itunes_results = search_itunes_movies(&client, trimmed, year).await?;
-    Ok((MetadataProvider::Imdb, itunes_results))
+    Ok((MetadataProvider::Imdb, Vec::new()))
 }
 
 fn encode_imdb_suggestion_slug(query: &str) -> Option<(char, String)> {
@@ -1380,7 +1473,8 @@ pub async fn fetch_series_episodes(
         }
     }
 
-    // 2. TMDB season episodes when key + tmdb_id exist
+    // 2. TMDB season episodes when key + tmdb_id exist (fetches full season count up to 15
+    //    so cross-season episode title matching works even when a filename has a wrong/missing season)
     if let (Some(tmdb_key), Some(tmdb_id)) = (
         config
             .tmdb_api_key
@@ -1389,14 +1483,23 @@ pub async fn fetch_series_episodes(
             .filter(|k| !k.is_empty()),
         norm.tmdb_id.as_deref(),
     ) {
-        let target_seasons: Vec<u32> = if seasons_hint.is_empty() {
-            vec![1]
+        let mut target_seasons: Vec<u32> = if let Some(total) =
+            fetch_tmdb_season_count(&client, tmdb_id, tmdb_key).await
+        {
+            (1..=total.min(15)).collect()
         } else {
-            let mut dedup = seasons_hint.to_vec();
-            dedup.sort_unstable();
-            dedup.dedup();
-            dedup.into_iter().take(20).collect()
+            Vec::new()
         };
+        for &s in seasons_hint {
+            if s > 0 && !target_seasons.contains(&s) {
+                target_seasons.push(s);
+            }
+        }
+        if target_seasons.is_empty() {
+            target_seasons.push(1);
+        }
+        target_seasons.sort_unstable();
+        target_seasons.dedup();
         if let Ok(eps) = fetch_tmdb_episodes(&client, tmdb_id, &target_seasons, tmdb_key).await {
             if !eps.is_empty() {
                 return Ok((MetadataProvider::Tmdb, eps));
@@ -1497,6 +1600,29 @@ pub fn parse_tvdb_episodes_response(json: &Value) -> Vec<EpisodeInfo> {
             })
         })
         .collect()
+}
+
+async fn fetch_tmdb_season_count(
+    client: &reqwest::Client,
+    tmdb_id: &str,
+    api_key: &str,
+) -> Option<u32> {
+    let url = format!("https://api.themoviedb.org/3/tv/{tmdb_id}");
+    let mut req = client.get(&url);
+    if is_tmdb_bearer_token(api_key) {
+        req = req.bearer_auth(api_key);
+    } else {
+        req = req.query(&[("api_key", api_key)]);
+    }
+    let resp = req.send().await.ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let json = resp.json::<Value>().await.ok()?;
+    json.get("number_of_seasons")
+        .and_then(Value::as_u64)
+        .and_then(|n| u32::try_from(n).ok())
+        .filter(|&n| n > 0)
 }
 
 async fn fetch_tmdb_episodes(
