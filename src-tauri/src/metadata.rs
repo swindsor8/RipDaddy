@@ -40,6 +40,28 @@ pub enum NamingConvention {
     Plain,
 }
 
+/// Controls how RipDaddy organizes encoded output files into Show / Season subfolders.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum FolderOrganization {
+    /// Creates `<Show (Year) [tag]>/Season 01/<filename>` (or `<Show (Year)>/...` for Plain).
+    ShowAndSeason,
+    /// Creates `Season 01/<filename>` directly inside the chosen output directory.
+    SeasonOnly,
+    /// Writes `<filename>` flat into the chosen output directory without creating subfolders.
+    Flat,
+}
+
+impl FolderOrganization {
+    /// Default folder organization matching a naming convention when none is explicitly chosen.
+    pub fn default_for(convention: NamingConvention) -> Self {
+        match convention {
+            NamingConvention::Plex | NamingConvention::Jellyfin => Self::ShowAndSeason,
+            NamingConvention::Plain => Self::Flat,
+        }
+    }
+}
+
 /// External catalog IDs attached to a movie or series.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -337,11 +359,29 @@ pub fn format_provider_tag(
     })
 }
 
-/// Builds a media-server-ready relative output path (folder + filename) from metadata.
+/// Builds a media-server-ready relative output path (folder + filename) using the
+/// convention's default folder organization.
 pub fn format_output_relative_path(
     meta: &MediaMetadata,
     convention: NamingConvention,
     extension: &str,
+) -> String {
+    format_output_relative_path_with_org(
+        meta,
+        convention,
+        extension,
+        FolderOrganization::default_for(convention),
+    )
+}
+
+/// Builds a media-server-ready relative output path with explicit Show / Season / Flat
+/// folder organization so multi-season folders can be split into `Season 01`, `Season 02`,
+/// etc., or kept flat when the target folder is already organized.
+pub fn format_output_relative_path_with_org(
+    meta: &MediaMetadata,
+    convention: NamingConvention,
+    extension: &str,
+    organization: FolderOrganization,
 ) -> String {
     let ext = extension.trim().trim_start_matches('.');
     let ext = if ext.is_empty() { "mkv" } else { ext };
@@ -364,10 +404,20 @@ pub fn format_output_relative_path(
     };
 
     match meta.kind {
-        MediaKind::Movie => match convention {
-            NamingConvention::Plain => format!("{base_name}.{ext}"),
-            NamingConvention::Plex | NamingConvention::Jellyfin => {
-                format!("{tagged_base}/{tagged_base}.{ext}")
+        MediaKind::Movie => match organization {
+            FolderOrganization::Flat => match convention {
+                NamingConvention::Plain => format!("{base_name}.{ext}"),
+                NamingConvention::Plex | NamingConvention::Jellyfin => {
+                    format!("{tagged_base}.{ext}")
+                }
+            },
+            FolderOrganization::ShowAndSeason | FolderOrganization::SeasonOnly => {
+                match convention {
+                    NamingConvention::Plain => format!("{base_name}/{base_name}.{ext}"),
+                    NamingConvention::Plex | NamingConvention::Jellyfin => {
+                        format!("{tagged_base}/{tagged_base}.{ext}")
+                    }
+                }
             }
         },
         MediaKind::TvEpisode => {
@@ -385,9 +435,10 @@ pub fn format_output_relative_path(
                 None => format!("{base_name} - {ep_code}.{ext}"),
             };
 
-            match convention {
-                NamingConvention::Plain => filename,
-                NamingConvention::Plex | NamingConvention::Jellyfin => {
+            match organization {
+                FolderOrganization::Flat => filename,
+                FolderOrganization::SeasonOnly => format!("Season {season:02}/{filename}"),
+                FolderOrganization::ShowAndSeason => {
                     format!("{tagged_base}/Season {season:02}/{filename}")
                 }
             }
@@ -465,13 +516,23 @@ pub async fn search_metadata(
 
     match query.provider {
         MetadataProvider::Imdb => {
-            let api_key = config
+            if let Some(api_key) = config
                 .omdb_api_key
                 .as_deref()
                 .map(str::trim)
                 .filter(|k| !k.is_empty())
-                .ok_or(MetadataError::MissingApiKey(MetadataProvider::Imdb))?;
-            search_omdb(&client, trimmed_query, query.year, query.kind, api_key).await
+            {
+                search_omdb(&client, trimmed_query, query.year, query.kind, api_key).await
+            } else if query.kind == MediaKind::Movie {
+                let res = search_imdb_public_suggestions(&client, trimmed_query, query.year).await?;
+                if !res.is_empty() {
+                    Ok(res)
+                } else {
+                    search_itunes_movies(&client, trimmed_query, query.year).await
+                }
+            } else {
+                Err(MetadataError::MissingApiKey(MetadataProvider::Imdb))
+            }
         }
         MetadataProvider::Tvdb => {
             let api_key = config
@@ -1026,6 +1087,272 @@ pub async fn auto_search_tv_series(
     Ok((MetadataProvider::Tvmaze, tvmaze_results))
 }
 
+/// Automatically searches the best available metadata service for a feature film:
+/// OMDb (IMDb) -> TMDB (with IMDb external_ids hydration) -> TVDB v4 -> free keyless
+/// IMDb suggestion / iTunes movie lookup so batch movie folders work even with zero API keys.
+pub async fn auto_search_movie(
+    query: &str,
+    year: Option<u16>,
+    config: &MetadataProviderConfig,
+) -> Result<(MetadataProvider, Vec<MediaMetadata>), MetadataError> {
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        return Err(MetadataError::InvalidInput(
+            "Could not infer a movie title from filename.".to_string(),
+        ));
+    }
+
+    let client = build_http_client()?;
+
+    // 1. OMDb (IMDb) if configured
+    if let Some(omdb_key) = config
+        .omdb_api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|k| !k.is_empty())
+    {
+        if let Ok(results) =
+            search_omdb(&client, trimmed, year, MediaKind::Movie, omdb_key).await
+        {
+            if !results.is_empty() {
+                return Ok((MetadataProvider::Imdb, results));
+            }
+        }
+    }
+
+    // 2. TMDB if configured (+ hydrate IMDb ID on top match)
+    if let Some(tmdb_key) = config
+        .tmdb_api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|k| !k.is_empty())
+    {
+        if let Ok(mut results) =
+            search_tmdb(&client, trimmed, year, MediaKind::Movie, tmdb_key).await
+        {
+            if !results.is_empty() {
+                if let Some(tmdb_id) = results[0].ids.tmdb_id.clone() {
+                    if let Ok(ext) =
+                        fetch_tmdb_external_ids(MediaKind::Movie, &tmdb_id, config.clone()).await
+                    {
+                        results[0].ids = ext;
+                    }
+                }
+                return Ok((MetadataProvider::Tmdb, results));
+            }
+        }
+    }
+
+    // 3. TVDB v4 movies if configured
+    if let Some(tvdb_key) = config
+        .tvdb_api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|k| !k.is_empty())
+    {
+        if let Ok(results) =
+            search_tvdb(&client, trimmed, year, MediaKind::Movie, tvdb_key).await
+        {
+            if !results.is_empty() {
+                return Ok((MetadataProvider::Tvdb, results));
+            }
+        }
+    }
+
+    // 4. Keyless IMDb public suggestion endpoint (returns canonical title, year, tt-ID, poster)
+    if let Ok(results) = search_imdb_public_suggestions(&client, trimmed, year).await {
+        if !results.is_empty() {
+            return Ok((MetadataProvider::Imdb, results));
+        }
+    }
+
+    // 5. Keyless Apple iTunes movie catalog fallback
+    let itunes_results = search_itunes_movies(&client, trimmed, year).await?;
+    Ok((MetadataProvider::Imdb, itunes_results))
+}
+
+fn encode_imdb_suggestion_slug(query: &str) -> Option<(char, String)> {
+    let mut slug = String::new();
+    let mut prev_underscore = false;
+    for ch in query.chars() {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch.to_ascii_lowercase());
+            prev_underscore = false;
+        } else if !slug.is_empty() && !prev_underscore {
+            slug.push('_');
+            prev_underscore = true;
+        }
+    }
+    let slug = slug.trim_matches('_').to_string();
+    let first = slug.chars().find(|c| c.is_ascii_alphanumeric())?;
+    Some((first, slug))
+}
+
+async fn search_imdb_public_suggestions(
+    client: &reqwest::Client,
+    query: &str,
+    year: Option<u16>,
+) -> Result<Vec<MediaMetadata>, MetadataError> {
+    let Some((first, slug)) = encode_imdb_suggestion_slug(query) else {
+        return Ok(Vec::new());
+    };
+    let url = format!("https://v3.sg.media-imdb.com/suggestion/{first}/{slug}.json");
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|err| MetadataError::Network(err.to_string()))?;
+    if !resp.status().is_success() {
+        return Ok(Vec::new());
+    }
+    let json: Value = resp
+        .json()
+        .await
+        .map_err(|err| MetadataError::ProviderError(err.to_string()))?;
+    Ok(parse_imdb_suggestion_movies(&json, year))
+}
+
+pub fn parse_imdb_suggestion_movies(json: &Value, year_hint: Option<u16>) -> Vec<MediaMetadata> {
+    let Some(items) = json.get("d").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut out: Vec<MediaMetadata> = items
+        .iter()
+        .filter_map(|item| {
+            let id_raw = item.get("id").and_then(Value::as_str)?;
+            let imdb_id = normalize_imdb_id(id_raw)?;
+            let qid = item
+                .get("qid")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            let q = item
+                .get("q")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            let is_movie = qid == "movie"
+                || qid == "tvmovie"
+                || qid == "video"
+                || q.contains("feature");
+            if !is_movie {
+                return None;
+            }
+            let title = item.get("l").and_then(Value::as_str)?.trim().to_string();
+            if title.is_empty() {
+                return None;
+            }
+            let year = item
+                .get("y")
+                .and_then(Value::as_u64)
+                .and_then(|y| u16::try_from(y).ok());
+            let poster_url = item
+                .get("i")
+                .and_then(|img| img.get("imageUrl"))
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            Some(MediaMetadata {
+                kind: MediaKind::Movie,
+                title,
+                year,
+                season: None,
+                episode: None,
+                episode_title: None,
+                ids: ExternalIds {
+                    imdb_id: Some(imdb_id),
+                    tvdb_id: None,
+                    tmdb_id: None,
+                },
+                overview: None,
+                poster_url,
+            })
+        })
+        .take(8)
+        .collect();
+
+    if let Some(target_year) = year_hint {
+        if let Some(pos) = out.iter().position(|m| m.year == Some(target_year)) {
+            if pos > 0 {
+                let matched = out.remove(pos);
+                out.insert(0, matched);
+            }
+        }
+    }
+    out
+}
+
+async fn search_itunes_movies(
+    client: &reqwest::Client,
+    query: &str,
+    year_hint: Option<u16>,
+) -> Result<Vec<MediaMetadata>, MetadataError> {
+    let resp = client
+        .get("https://itunes.apple.com/search")
+        .query(&[
+            ("media", "movie"),
+            ("entity", "movie"),
+            ("limit", "6"),
+            ("term", query),
+        ])
+        .send()
+        .await
+        .map_err(|err| MetadataError::Network(err.to_string()))?;
+    if !resp.status().is_success() {
+        return Ok(Vec::new());
+    }
+    let json: Value = resp
+        .json()
+        .await
+        .map_err(|err| MetadataError::ProviderError(err.to_string()))?;
+    let Some(items) = json.get("results").and_then(Value::as_array) else {
+        return Ok(Vec::new());
+    };
+    let mut out: Vec<MediaMetadata> = items
+        .iter()
+        .filter_map(|item| {
+            let title = item
+                .get("trackName")
+                .and_then(Value::as_str)?
+                .trim()
+                .to_string();
+            if title.is_empty() {
+                return None;
+            }
+            let year = item
+                .get("releaseDate")
+                .and_then(Value::as_str)
+                .and_then(parse_year_prefix);
+            let poster_url = item
+                .get("artworkUrl100")
+                .and_then(Value::as_str)
+                .map(|url| url.replace("100x100bb", "400x600bb"));
+            let overview = non_empty_url(item.get("longDescription").and_then(Value::as_str))
+                .or_else(|| non_empty_url(item.get("shortDescription").and_then(Value::as_str)));
+            Some(MediaMetadata {
+                kind: MediaKind::Movie,
+                title,
+                year,
+                season: None,
+                episode: None,
+                episode_title: None,
+                ids: ExternalIds::default(),
+                overview,
+                poster_url,
+            })
+        })
+        .collect();
+
+    if let Some(target_year) = year_hint {
+        if let Some(pos) = out.iter().position(|m| m.year == Some(target_year)) {
+            if pos > 0 {
+                let matched = out.remove(pos);
+                out.insert(0, matched);
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// Fetches official `(season, episode, title)` records for a TV show using whichever
 /// metadata service is available (TVDB v4 -> TMDB -> keyless TVMaze).
 pub async fn fetch_series_episodes(
@@ -1068,7 +1395,7 @@ pub async fn fetch_series_episodes(
             let mut dedup = seasons_hint.to_vec();
             dedup.sort_unstable();
             dedup.dedup();
-            dedup.into_iter().take(6).collect()
+            dedup.into_iter().take(20).collect()
         };
         if let Ok(eps) = fetch_tmdb_episodes(&client, tmdb_id, &target_seasons, tmdb_key).await {
             if !eps.is_empty() {
@@ -1456,6 +1783,33 @@ mod tests {
             format_output_relative_path(&tv, NamingConvention::Plex, "mkv"),
             "Breaking Bad (2008) {tvdb-81189}/Season 01/Breaking Bad (2008) - S01E01 - Pilot.mkv"
         );
+        assert_eq!(
+            format_output_relative_path_with_org(
+                &tv,
+                NamingConvention::Plex,
+                "mkv",
+                FolderOrganization::SeasonOnly
+            ),
+            "Season 01/Breaking Bad (2008) - S01E01 - Pilot.mkv"
+        );
+        assert_eq!(
+            format_output_relative_path_with_org(
+                &tv,
+                NamingConvention::Plex,
+                "mkv",
+                FolderOrganization::Flat
+            ),
+            "Breaking Bad (2008) - S01E01 - Pilot.mkv"
+        );
+        assert_eq!(
+            format_output_relative_path_with_org(
+                &tv,
+                NamingConvention::Plain,
+                "mp4",
+                FolderOrganization::ShowAndSeason
+            ),
+            "Breaking Bad (2008)/Season 01/Breaking Bad (2008) - S01E01 - Pilot.mp4"
+        );
     }
 
     #[test]
@@ -1518,5 +1872,26 @@ mod tests {
         assert_eq!(tvmaze_res[0].ids.tvdb_id.as_deref(), Some("81189"));
         assert_eq!(tvmaze_res[0].ids.imdb_id.as_deref(), Some("tt0903747"));
         assert_eq!(tvmaze_res[0].overview.as_deref(), Some("A chemistry teacher."));
+
+        let imdb_sug = serde_json::json!({
+            "d": [
+                {
+                    "id": "tt0133093",
+                    "l": "The Matrix",
+                    "qid": "movie",
+                    "y": 1999,
+                    "i": { "imageUrl": "https://m.media-amazon.com/matrix.jpg" }
+                },
+                {
+                    "id": "nm0000206",
+                    "l": "Keanu Reeves"
+                }
+            ]
+        });
+        let sug_res = parse_imdb_suggestion_movies(&imdb_sug, Some(1999));
+        assert_eq!(sug_res.len(), 1);
+        assert_eq!(sug_res[0].title, "The Matrix");
+        assert_eq!(sug_res[0].ids.imdb_id.as_deref(), Some("tt0133093"));
+        assert_eq!(sug_res[0].year, Some(1999));
     }
 }

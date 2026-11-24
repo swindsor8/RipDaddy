@@ -264,6 +264,18 @@
       onUpdateSetting("defaultMetadataProvider", value);
     }
   }
+
+  function handleFolderOrgChange(event: Event): void {
+    const value = (event.currentTarget as HTMLSelectElement).value;
+    if (
+      value === "ask" ||
+      value === "showAndSeason" ||
+      value === "seasonOnly" ||
+      value === "flat"
+    ) {
+      onUpdateSetting("tvFolderOrganization", value);
+    }
+  }
 </script>
 
 <svelte:window onkeydown={handleWindowKeydown} />
@@ -1269,6 +1281,29 @@
                   <option value="tvmaze">TVMaze (Free TV · No Key)</option>
                 </select>
               </div>
+            </div>
+
+            <div class="space-y-1.5">
+                <label
+                  for="setting-tv-folder-org"
+                  class="block text-xs font-semibold text-[#111111]"
+                >
+                  Batch Output Folder Organization
+                </label>
+                <select
+                  id="setting-tv-folder-org"
+                  value={settings.tvFolderOrganization}
+                  onchange={handleFolderOrgChange}
+                  class="w-full rounded-lg border border-[#E5E3DD] bg-[#F8F7F4] px-3 py-2 text-xs text-[#111111] outline-none focus:border-[#111111] focus:bg-white"
+                >
+                  <option value="ask">Ask before encoding batches (Recommended)</option>
+                  <option value="showAndSeason">Create Movie / Show &amp; Season XX folders</option>
+                  <option value="seasonOnly">Create Season XX folders directly in Output dir</option>
+                  <option value="flat">Keep flat (no extra subfolders)</option>
+                </select>
+                <p class="text-[11px] text-[#6B6A65]">
+                  Controls whether Movie and multi-season TV batches automatically create organized folders as they encode.
+                </p>
             </div>
 
             <div class="space-y-3 rounded-xl border border-[#E5E3DD] bg-[#FAF9F6] p-3.5">

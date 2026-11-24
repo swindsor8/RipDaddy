@@ -11,8 +11,8 @@ use folder_id::FolderIdentifyResult;
 use handbrake::{HandBrakePreset, QualityProfile};
 use makemkv::{DiscScanResult, OpticalDrive};
 use metadata::{
-    DiscLabelGuess, EpisodeInfo, ExternalIds, MediaKind, MediaMetadata, MetadataProvider,
-    MetadataProviderConfig, MetadataSearchQuery, NamingConvention,
+    DiscLabelGuess, EpisodeInfo, ExternalIds, FolderOrganization, MediaKind, MediaMetadata,
+    MetadataProvider, MetadataProviderConfig, MetadataSearchQuery, NamingConvention,
 };
 use pipeline::{EnqueueJobRequest, PipelineController, PipelineEvent, QueueJob};
 use preview::TrickplayPreview;
@@ -186,11 +186,14 @@ fn preview_output_filename(
     media: MediaMetadata,
     convention: NamingConvention,
     extension: Option<String>,
+    folder_organization: Option<FolderOrganization>,
 ) -> String {
-    metadata::format_output_relative_path(
+    let org = folder_organization.unwrap_or_else(|| FolderOrganization::default_for(convention));
+    metadata::format_output_relative_path_with_org(
         &media,
         convention,
         extension.as_deref().unwrap_or("mkv"),
+        org,
     )
 }
 

@@ -247,6 +247,22 @@ export type MetadataProvider = "imdb" | "tvdb" | "tmdb" | "tvmaze";
 
 export type NamingConvention = "plex" | "jellyfin" | "plain";
 
+export type FolderOrganization = "showAndSeason" | "seasonOnly" | "flat";
+
+export type FolderOrganizationPref = "ask" | FolderOrganization;
+
+export interface EpisodePreviewSample {
+  kind: MediaKind;
+  title: string;
+  year: number | null;
+  providerTag: string | null;
+  season: number | null;
+  episode: number | null;
+  episodeTitle: string | null;
+}
+
+export type FolderContentKind = "tvSeries" | "movies" | "mixed";
+
 export interface ExternalIds {
   imdbId: string | null;
   tvdbId: string | null;
@@ -263,14 +279,20 @@ export interface IdentifiedVideoFile {
   path: string;
   fileName: string;
   fileSizeBytes: number | null;
+  durationSeconds: number | null;
+  mediaKind: MediaKind;
   season: number | null;
   episode: number | null;
   episodeTitle: string | null;
+  movieMetadata: MediaMetadata | null;
+  movieCandidates: MediaMetadata[];
   matchedFromCatalog: boolean;
+  needsTitle: boolean;
 }
 
 export interface FolderIdentifyResult {
   folderPath: string | null;
+  detectedKind: FolderContentKind;
   inferredShowQuery: string;
   providerUsed: MetadataProvider | null;
   matchedShow: MediaMetadata | null;
@@ -372,6 +394,7 @@ export interface EnqueueJobRequest {
   keepTempMkv: boolean;
   autoEjectDisc: boolean;
   namingConvention: NamingConvention;
+  folderOrganization: FolderOrganization | null;
   mediaMetadata: MediaMetadata | null;
 }
 
@@ -422,6 +445,7 @@ export interface AppSettings {
   minTitleLengthSeconds: number;
   // Metadata & Naming
   namingConvention: NamingConvention;
+  tvFolderOrganization: FolderOrganizationPref;
   defaultMetadataProvider: MetadataProvider;
   omdbApiKey: string | null;
   tvdbApiKey: string | null;

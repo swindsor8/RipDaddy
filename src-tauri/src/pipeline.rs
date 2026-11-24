@@ -15,7 +15,7 @@ use crate::handbrake::{
     self, EncodeOptions, HandBrakeState, ProgressStreamParser, QualityProfile,
 };
 use crate::makemkv::{self, RobotMessage};
-use crate::metadata::{self, MediaMetadata, NamingConvention};
+use crate::metadata::{self, FolderOrganization, MediaMetadata, NamingConvention};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
@@ -185,6 +185,7 @@ pub struct EnqueueJobRequest {
     pub keep_temp_mkv: bool,
     pub auto_eject_disc: bool,
     pub naming_convention: NamingConvention,
+    pub folder_organization: Option<FolderOrganization>,
     pub media_metadata: Option<MediaMetadata>,
 }
 
@@ -660,9 +661,17 @@ impl PipelineController {
                     .unwrap_or_else(|| "mkv".to_string())
             };
 
+            let folder_org = req
+                .folder_organization
+                .unwrap_or_else(|| FolderOrganization::default_for(req.naming_convention));
             let relative_output = if let Some(ref meta) = req.media_metadata {
                 if !meta.title.trim().is_empty() {
-                    metadata::format_output_relative_path(meta, req.naming_convention, &extension)
+                    metadata::format_output_relative_path_with_org(
+                        meta,
+                        req.naming_convention,
+                        &extension,
+                        folder_org,
+                    )
                 } else {
                     fallback_filename(&req.title_name, &extension)
                 }

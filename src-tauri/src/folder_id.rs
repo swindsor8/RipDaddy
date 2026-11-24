@@ -1,50 +1,86 @@
-//! Smart video folder scanner, messy filename/episode parser, and automatic
-//! TV series + episode catalog matcher (TVDB v4 -> TMDB -> keyless TVMaze).
+//! Smart video folder scanner, runtime + filename/marker classifier (Movies vs. TV Series
+//! vs. Mixed), and automatic per-movie / TV-series catalog matcher.
 //!
-//! Designed for batch re-encoding messy TV season folders (e.g., bloated 24 GB MKV
-//! remuxes or 15 GB MP4 encodes with inconsistent filenames) so every file receives
-//! uniform, server-ready naming (`Plex`, `Jellyfin`, or `Plain`).
+//! Combines fast container-only `ffprobe` duration checks (`~20–40ms` per file, no decoding)
+//! with filename & folder episode markers (`S01E04`, `S1E4`, `1x04`, `Ep04`, `Season 1`)
+//! so dropping any folder — whether a jumbled multi-season TV folder, a folder of unrelated
+//! raw movie backups (`THE_MATRIX_1999_t00.mkv`, `Inception.2010.REMUX.mkv`), or a mix of
+//! both — automatically identifies what it's dealing with.
 
+use crate::detect;
 use crate::metadata::{
-    self, EpisodeInfo, MediaMetadata, MetadataProvider, MetadataProviderConfig,
+    self, EpisodeInfo, MediaKind, MediaMetadata, MetadataProvider, MetadataProviderConfig,
 };
+use crate::preview;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use tokio::sync::Semaphore;
 
 const VIDEO_EXTENSIONS: &[&str] = &["mkv", "mp4", "m4v", "mov", "avi", "ts", "m2ts", "webm"];
 const MAX_SCAN_DEPTH: usize = 3;
+const MAX_CONCURRENT_PROBES: usize = 6;
+const MAX_CONCURRENT_MOVIE_LOOKUPS: usize = 4;
+
+/// Feature-film runtime heuristic (`>= 75 minutes` without explicit TV episode markers).
+const MOVIE_DURATION_THRESHOLD_SECS: f64 = 4500.0;
+
+/// High-level detected folder category returned to the UI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum FolderContentKind {
+    TvSeries,
+    Movies,
+    Mixed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GenericFolderHint {
+    Movies,
+    Tv,
+    Neutral,
+    Named,
+}
 
 /// Parsed filename + parent-folder hints extracted locally before querying any catalog.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedVideoHints {
-    pub show_guess: Option<String>,
+    pub title_guess: Option<String>,
     pub year_guess: Option<u16>,
     pub season: Option<u32>,
     pub episode: Option<u32>,
+    pub explicit_tv_marker: bool,
+    pub in_season_folder: bool,
     pub episode_title_hint: Option<String>,
 }
 
-/// One discovered local video file enriched with size, parsed/matched season+episode,
-/// and official episode title from TVDB/TMDB/TVMaze.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// One discovered local video file enriched with size, runtime, detected `MediaKind`
+/// (`movie` vs `tvEpisode`), and matched TV episode or per-row Movie metadata.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IdentifiedVideoFile {
     pub path: String,
     pub file_name: String,
     pub file_size_bytes: Option<u64>,
+    pub duration_seconds: Option<f64>,
+    pub media_kind: MediaKind,
     pub season: Option<u32>,
     pub episode: Option<u32>,
     pub episode_title: Option<String>,
+    pub movie_metadata: Option<MediaMetadata>,
+    pub movie_candidates: Vec<MediaMetadata>,
     pub matched_from_catalog: bool,
+    pub needs_title: bool,
 }
 
-/// Full result returned after scanning a folder (or existing list of files) and
-/// automatically identifying the show and every episode.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Full result returned after scanning a folder (or list of files) and auto-identifying
+/// whether it contains TV episodes, unrelated movies, or a mix of both.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FolderIdentifyResult {
     pub folder_path: Option<String>,
+    pub detected_kind: FolderContentKind,
     pub inferred_show_query: String,
     pub provider_used: Option<MetadataProvider>,
     pub matched_show: Option<MediaMetadata>,
@@ -116,6 +152,29 @@ pub fn collect_video_files_in_folder(folder: &Path) -> Result<Vec<(PathBuf, Opti
     Ok(collected)
 }
 
+fn classify_generic_folder_name(name: &str) -> GenericFolderHint {
+    let cleaned = name
+        .to_ascii_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { ' ' })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    match cleaned.as_str() {
+        "movies" | "movie" | "films" | "film" | "cinema" | "4k movies" | "uhd movies"
+        | "bluray movies" | "blu ray movies" | "dvd movies" | "feature films"
+        | "movie backups" | "movie rips" => GenericFolderHint::Movies,
+        "tv" | "tv shows" | "tv show" | "shows" | "series" | "television" | "anime"
+        | "tv backups" | "tv rips" => GenericFolderHint::Tv,
+        "rips" | "rip" | "backups" | "backup" | "videos" | "video" | "downloads" | "download"
+        | "incoming" | "unsorted" | "media" | "ripdaddy" | "staging" | "encode" | "to encode"
+        | "plex" | "jellyfin" => GenericFolderHint::Neutral,
+        _ => GenericFolderHint::Named,
+    }
+}
+
 /// Strips bracketed release/tag chunks (`[1080p]`, `{tvdb-12345}`) from a string.
 fn strip_bracketed_tags(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len());
@@ -135,7 +194,7 @@ fn strip_bracketed_tags(raw: &str) -> String {
 }
 
 fn is_noise_token(upper: &str) -> bool {
-    matches!(
+    if matches!(
         upper,
         "2160P"
             | "1080P"
@@ -161,6 +220,7 @@ fn is_noise_token(upper: &str) -> bool {
             | "HDTV"
             | "DVDRIP"
             | "DVD"
+            | "BD"
             | "X264"
             | "X265"
             | "H264"
@@ -216,7 +276,25 @@ fn is_noise_token(upper: &str) -> bool {
             | "SUBS"
             | "DUB"
             | "INTERNAL"
-    )
+            | "DISC1"
+            | "DISC2"
+            | "DISK1"
+            | "DISK2"
+    ) {
+        return true;
+    }
+    // Strip raw MakeMKV track suffixes like T00, T01, B1, C1, D1
+    if let Some(rest) = upper.strip_prefix('T') {
+        if rest.len() == 2 && rest.chars().all(|c| c.is_ascii_digit()) {
+            return true;
+        }
+    }
+    if let Some(rest) = upper.strip_prefix('D') {
+        if !rest.is_empty() && rest.len() <= 2 && rest.chars().all(|c| c.is_ascii_digit()) {
+            return true;
+        }
+    }
+    false
 }
 
 fn parse_sxxeyy_token(upper: &str) -> Option<(u32, u32)> {
@@ -227,7 +305,6 @@ fn parse_sxxeyy_token(upper: &str) -> Option<(u32, u32)> {
     if s_part.is_empty() || s_part.len() > 3 || !s_part.chars().all(|c| c.is_ascii_digit()) {
         return None;
     }
-    // Handle multi-episode like S01E01E02 or S01E01-E02 by taking first episode number
     let e_digits: String = e_part.chars().take_while(|c| c.is_ascii_digit()).collect();
     if e_digits.is_empty() || e_digits.len() > 3 {
         return None;
@@ -302,14 +379,46 @@ fn parse_folder_season_hint(folder_name: &str) -> Option<u32> {
     None
 }
 
-fn clean_show_tokens(tokens: &[String]) -> (Option<String>, Option<u16>) {
+fn title_case_if_shouting(words: Vec<String>) -> String {
+    let joined = words.join(" ").trim().to_string();
+    if joined.is_empty() {
+        return joined;
+    }
+    let has_alpha = joined.chars().any(|c| c.is_ascii_alphabetic());
+    let all_upper = has_alpha
+        && joined
+            .chars()
+            .filter(|c| c.is_ascii_alphabetic())
+            .all(|c| c.is_ascii_uppercase());
+    if all_upper {
+        words
+            .into_iter()
+            .map(|w| {
+                let mut chars = w.chars();
+                match chars.next() {
+                    Some(first) => {
+                        let mut out = String::new();
+                        out.extend(first.to_uppercase());
+                        out.push_str(&chars.as_str().to_ascii_lowercase());
+                        out
+                    }
+                    None => String::new(),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    } else {
+        joined
+    }
+}
+
+fn clean_title_tokens(tokens: &[String]) -> (Option<String>, Option<u16>) {
     let mut words = Vec::new();
     let mut year_guess: Option<u16> = None;
 
     for (idx, tok) in tokens.iter().enumerate() {
         let upper = tok.to_ascii_uppercase();
 
-        // Stop if we hit release/quality/codec junk after capturing show words
         if is_noise_token(&upper) {
             if !words.is_empty() {
                 break;
@@ -332,15 +441,11 @@ fn clean_show_tokens(tokens: &[String]) -> (Option<String>, Option<u16>) {
             continue;
         }
 
-        // Year token (e.g. 2008 or 2013)
         if tok.len() == 4 {
             if let Ok(yr) = tok.parse::<u16>() {
-                if (1920..=2099).contains(&yr) {
-                    // Don't treat "1984" or "2020" at index 0 with nothing else as only a year
-                    if !words.is_empty() || idx > 0 {
-                        year_guess = Some(yr);
-                        break;
-                    }
+                if (1920..=2099).contains(&yr) && (!words.is_empty() || idx > 0) {
+                    year_guess = Some(yr);
+                    break;
                 }
             }
         }
@@ -348,8 +453,8 @@ fn clean_show_tokens(tokens: &[String]) -> (Option<String>, Option<u16>) {
         words.push(tok.clone());
     }
 
-    let joined = words.join(" ").trim().to_string();
-    ((!joined.is_empty()).then_some(joined), year_guess)
+    let formatted = title_case_if_shouting(words);
+    ((!formatted.is_empty()).then_some(formatted), year_guess)
 }
 
 fn clean_episode_title_tokens(tokens: &[String]) -> Option<String> {
@@ -359,7 +464,6 @@ fn clean_episode_title_tokens(tokens: &[String]) -> Option<String> {
         if is_noise_token(&upper) {
             break;
         }
-        // Skip audio channel pairs like "5" "1" or standalone resolution/year at tail
         if tok.len() == 4 {
             if let Ok(yr) = tok.parse::<u16>() {
                 if (1920..=2099).contains(&yr) && !words.is_empty() {
@@ -369,12 +473,12 @@ fn clean_episode_title_tokens(tokens: &[String]) -> Option<String> {
         }
         words.push(tok.clone());
     }
-    let joined = words.join(" ").trim().to_string();
-    (!joined.is_empty()).then_some(joined)
+    let formatted = title_case_if_shouting(words);
+    (!formatted.is_empty()).then_some(formatted)
 }
 
-/// Parses messy filenames AND parent folder names into show name, year, season, episode,
-/// and episode title hints.
+/// Parses messy filenames AND parent folder names into title, year, season, episode,
+/// explicit TV marker flag, and episode title hints.
 pub fn parse_video_filename_hints(path: &Path) -> ParsedVideoHints {
     let stem = path
         .file_stem()
@@ -387,18 +491,34 @@ pub fn parse_video_filename_hints(path: &Path) -> ParsedVideoHints {
         .map(str::to_string)
         .collect();
 
+    let parent_name = path
+        .parent()
+        .and_then(|p| p.file_name())
+        .and_then(|n| n.to_str());
+    let grandparent_name = path
+        .parent()
+        .and_then(|p| p.parent())
+        .and_then(|p| p.file_name())
+        .and_then(|n| n.to_str());
+
+    let parent_season_hint = parent_name.and_then(parse_folder_season_hint);
+    let in_season_folder = parent_name.is_some_and(is_season_only_folder_name)
+        || parent_season_hint.is_some();
+
     let mut season: Option<u32> = None;
     let mut episode: Option<u32> = None;
+    let mut explicit_tv_marker = false;
     let mut ep_token_start: Option<usize> = None;
     let mut ep_token_end: Option<usize> = None;
 
-    // Pass 1: Look for explicit SxxEyy, NxNN, "Season X Episode Y", or "Sxx Eyy"
+    // Pass 1: Explicit SxxEyy, S1E4, NxNN, "Season X Episode Y", or "Sxx Eyy"
     let mut idx = 0;
     while idx < tokens.len() {
         let upper = tokens[idx].to_ascii_uppercase();
         if let Some((s, e)) = parse_sxxeyy_token(&upper) {
             season = Some(s);
             episode = Some(e);
+            explicit_tv_marker = true;
             ep_token_start = Some(idx);
             ep_token_end = Some(idx + 1);
             break;
@@ -406,6 +526,7 @@ pub fn parse_video_filename_hints(path: &Path) -> ParsedVideoHints {
         if let Some((s, e)) = parse_nxnn_token(&upper) {
             season = Some(s);
             episode = Some(e);
+            explicit_tv_marker = true;
             ep_token_start = Some(idx);
             ep_token_end = Some(idx + 1);
             break;
@@ -419,6 +540,7 @@ pub fn parse_video_filename_hints(path: &Path) -> ParsedVideoHints {
                         {
                             season = Some(s_val);
                             episode = Some(e_val);
+                            explicit_tv_marker = true;
                             ep_token_start = Some(idx);
                             ep_token_end = Some(idx + 4);
                             break;
@@ -432,6 +554,7 @@ pub fn parse_video_filename_hints(path: &Path) -> ParsedVideoHints {
                 if let Some(e_val) = parse_episode_only_token(&next.to_ascii_uppercase()) {
                     season = Some(s_val);
                     episode = Some(e_val);
+                    explicit_tv_marker = true;
                     ep_token_start = Some(idx);
                     ep_token_end = Some(idx + 2);
                     break;
@@ -441,12 +564,13 @@ pub fn parse_video_filename_hints(path: &Path) -> ParsedVideoHints {
         idx += 1;
     }
 
-    // Pass 2: Look for "Episode N", "Ep N", "E04", "Ep04"
+    // Pass 2: Explicit "Episode N", "Ep N", "E04", "Ep04"
     if episode.is_none() {
         for (i, tok) in tokens.iter().enumerate() {
             let upper = tok.to_ascii_uppercase();
             if let Some(e_val) = parse_episode_only_token(&upper) {
                 episode = Some(e_val);
+                explicit_tv_marker = true;
                 ep_token_start = Some(i);
                 ep_token_end = Some(i + 1);
                 break;
@@ -454,6 +578,7 @@ pub fn parse_video_filename_hints(path: &Path) -> ParsedVideoHints {
             if matches!(upper.as_str(), "EPISODE" | "EP") {
                 if let Some(e_val) = tokens.get(i + 1).and_then(|t| t.parse::<u32>().ok()) {
                     episode = Some(e_val);
+                    explicit_tv_marker = true;
                     ep_token_start = Some(i);
                     ep_token_end = Some(i + 2);
                     break;
@@ -462,13 +587,15 @@ pub fn parse_video_filename_hints(path: &Path) -> ParsedVideoHints {
         }
     }
 
-    // Pass 3: Leading episode number like "04 - New York Weenie.mkv" or "01. Pilot.mp4"
-    if episode.is_none() && !tokens.is_empty() {
+    // Pass 3: Leading episode number ("04 - New York Weenie.mkv") ONLY when inside a season folder
+    // (prevents misparsing movies like "12 Angry Men.mkv" or "300 - Rise of an Empire.mkv")
+    if episode.is_none() && in_season_folder && !tokens.is_empty() {
         let first = &tokens[0];
         if first.len() <= 3 && first.chars().all(|c| c.is_ascii_digit()) {
             if let Ok(num) = first.parse::<u32>() {
                 if (1..=300).contains(&num) && tokens.len() >= 2 {
                     episode = Some(num);
+                    explicit_tv_marker = true;
                     ep_token_start = Some(0);
                     ep_token_end = Some(1);
                 }
@@ -476,8 +603,8 @@ pub fn parse_video_filename_hints(path: &Path) -> ParsedVideoHints {
         }
     }
 
-    // Pass 4: 3-digit scene code like "The Office 201 The Dundies" (avoid years & 480/720/264/265)
-    if episode.is_none() {
+    // Pass 4: 3-digit scene code like "The Office 201 The Dundies" ONLY when inside a season/TV folder
+    if episode.is_none() && in_season_folder {
         for (i, tok) in tokens.iter().enumerate() {
             if tok.len() == 3 && tok.chars().all(|c| c.is_ascii_digit()) {
                 if let Ok(code) = tok.parse::<u32>() {
@@ -490,6 +617,7 @@ pub fn parse_video_filename_hints(path: &Path) -> ParsedVideoHints {
                     {
                         season = Some(s);
                         episode = Some(e);
+                        explicit_tv_marker = true;
                         ep_token_start = Some(i);
                         ep_token_end = Some(i + 1);
                         break;
@@ -499,37 +627,30 @@ pub fn parse_video_filename_hints(path: &Path) -> ParsedVideoHints {
         }
     }
 
-    // Extract show name before episode token, and episode title hint after episode token
     let before_tokens = match ep_token_start {
         Some(start) => &tokens[..start],
         None => &tokens[..],
     };
-    let (mut show_guess, mut year_guess) = clean_show_tokens(before_tokens);
+    let (mut title_guess, mut year_guess) = clean_title_tokens(before_tokens);
     let episode_title_hint = ep_token_end
         .filter(|&end| end < tokens.len())
         .and_then(|end| clean_episode_title_tokens(&tokens[end..]));
 
-    // Inspect parent & grandparent folder names for missing season / show name / year
-    let parent_name = path
-        .parent()
-        .and_then(|p| p.file_name())
-        .and_then(|n| n.to_str());
-    let grandparent_name = path
-        .parent()
-        .and_then(|p| p.parent())
-        .and_then(|p| p.file_name())
-        .and_then(|n| n.to_str());
-
     if season.is_none() {
-        if let Some(p) = parent_name {
-            season = parse_folder_season_hint(p);
-        }
+        season = parent_season_hint;
     }
 
-    if show_guess.is_none() || show_guess.as_deref().is_some_and(is_generic_stem) {
+    // Only inherit title from parent/grandparent folder if it is NOT a generic folder ("Movies", "Rips", etc.)
+    if title_guess.is_none() || title_guess.as_deref().is_some_and(is_generic_stem) {
         let folder_candidate = parent_name
-            .filter(|p| !is_season_only_folder_name(p))
-            .or(grandparent_name.filter(|p| !is_season_only_folder_name(p)));
+            .filter(|p| {
+                !is_season_only_folder_name(p)
+                    && classify_generic_folder_name(p) == GenericFolderHint::Named
+            })
+            .or(grandparent_name.filter(|p| {
+                !is_season_only_folder_name(p)
+                    && classify_generic_folder_name(p) == GenericFolderHint::Named
+            }));
 
         if let Some(folder_str) = folder_candidate {
             let folder_stripped = strip_bracketed_tags(folder_str);
@@ -538,9 +659,9 @@ pub fn parse_video_filename_hints(path: &Path) -> ParsedVideoHints {
                 .filter(|t| !t.is_empty())
                 .map(str::to_string)
                 .collect();
-            let (folder_show, folder_year) = clean_show_tokens(&folder_tokens);
-            if folder_show.is_some() {
-                show_guess = folder_show;
+            let (folder_title, folder_year) = clean_title_tokens(&folder_tokens);
+            if folder_title.is_some() {
+                title_guess = folder_title;
             }
             if year_guess.is_none() {
                 year_guess = folder_year;
@@ -549,10 +670,12 @@ pub fn parse_video_filename_hints(path: &Path) -> ParsedVideoHints {
     }
 
     ParsedVideoHints {
-        show_guess,
+        title_guess,
         year_guess,
         season,
         episode,
+        explicit_tv_marker,
+        in_season_folder,
         episode_title_hint,
     }
 }
@@ -578,13 +701,125 @@ fn is_season_only_folder_name(name: &str) -> bool {
 
 fn is_generic_stem(s: &str) -> bool {
     let lower = s.trim().to_ascii_lowercase();
-    lower.is_empty()
+    if lower.is_empty()
         || lower.starts_with("title")
         || lower.starts_with("video")
         || lower.starts_with("track")
+        || lower.starts_with("movie")
         || lower.starts_with("b1_")
+        || lower.starts_with("c1_")
         || lower.starts_with("t0")
         || lower.chars().all(|c| c.is_ascii_digit())
+    {
+        return true;
+    }
+    // Single-letter + digits MakeMKV dump patterns like "b1", "a1", "f1"
+    if lower.len() <= 3
+        && lower.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+        && lower[1..].chars().all(|c| c.is_ascii_digit())
+    {
+        return true;
+    }
+    false
+}
+
+/// Classifies each individual video file as `MediaKind::Movie` or `MediaKind::TvEpisode`
+/// by fusing filename/folder markers (`S01E04`, `1x04`, `Season 1`, `Movies/`) with
+/// actual runtime length (`>= 75 min` -> Movie unless explicit TV markers exist).
+pub fn classify_files_and_folder(
+    folder_path: Option<&Path>,
+    hints: &[ParsedVideoHints],
+    durations: &[Option<f64>],
+) -> (FolderContentKind, Vec<MediaKind>) {
+    let folder_hint = folder_path
+        .and_then(|p| p.file_name())
+        .and_then(|n| n.to_str())
+        .map(classify_generic_folder_name)
+        .unwrap_or(GenericFolderHint::Neutral);
+
+    // Check if files share one dominant title prefix (strong TV series signal)
+    let mut prefix_counts: HashMap<String, usize> = HashMap::new();
+    let mut distinct_titles = HashSet::new();
+    for h in hints {
+        if let Some(ref t) = h.title_guess {
+            if !is_generic_stem(t) {
+                let norm = t.to_ascii_lowercase();
+                *prefix_counts.entry(norm.clone()).or_insert(0) += 1;
+                distinct_titles.insert(norm);
+            }
+        }
+    }
+    let max_shared_prefix = prefix_counts.values().copied().max().unwrap_or(0);
+    let shares_one_show_name = hints.len() >= 2
+        && max_shared_prefix >= 2
+        && (max_shared_prefix as f64 / hints.len() as f64) >= 0.6;
+
+    let any_explicit_tv = hints.iter().any(|h| h.explicit_tv_marker || h.in_season_folder);
+
+    let mut per_file_kinds = Vec::with_capacity(hints.len());
+    for (hint, dur_opt) in hints.iter().zip(durations.iter()) {
+        // 1. Explicit episode markers (S01E04, S1E4, 1x04, Ep04, Season 1 folder) always win
+        if hint.explicit_tv_marker || hint.in_season_folder {
+            per_file_kinds.push(MediaKind::TvEpisode);
+            continue;
+        }
+
+        // 2. Feature-film runtime (>= 75 min) without explicit TV markers -> Movie!
+        if let Some(dur) = *dur_opt {
+            if dur >= MOVIE_DURATION_THRESHOLD_SECS {
+                per_file_kinds.push(MediaKind::Movie);
+                continue;
+            }
+        }
+
+        // 3. Explicit "Movies" / "Films" folder name without episode markers -> Movie!
+        if folder_hint == GenericFolderHint::Movies {
+            per_file_kinds.push(MediaKind::Movie);
+            continue;
+        }
+
+        // 4. Multiple files sharing a single show name -> TV episodes
+        if shares_one_show_name || folder_hint == GenericFolderHint::Tv {
+            per_file_kinds.push(MediaKind::TvEpisode);
+            continue;
+        }
+
+        // 5. Multiple distinct titles (e.g. "The Matrix", "Inception", "Toy Story") without TV markers -> Movies!
+        if distinct_titles.len() >= 2 && !any_explicit_tv {
+            per_file_kinds.push(MediaKind::Movie);
+            continue;
+        }
+
+        // 6. Shorter unnamed rips (< 75 min) in a named folder -> TV episodes; otherwise Movie if year present
+        if let Some(dur) = *dur_opt {
+            if dur < MOVIE_DURATION_THRESHOLD_SECS && folder_hint == GenericFolderHint::Named {
+                per_file_kinds.push(MediaKind::TvEpisode);
+                continue;
+            }
+        }
+
+        if hint.year_guess.is_some() && !any_explicit_tv {
+            per_file_kinds.push(MediaKind::Movie);
+        } else {
+            per_file_kinds.push(MediaKind::TvEpisode);
+        }
+    }
+
+    let movie_count = per_file_kinds
+        .iter()
+        .filter(|k| **k == MediaKind::Movie)
+        .count();
+    let tv_count = per_file_kinds.len() - movie_count;
+
+    let folder_kind = if movie_count > 0 && tv_count > 0 {
+        FolderContentKind::Mixed
+    } else if movie_count > 0 {
+        FolderContentKind::Movies
+    } else {
+        FolderContentKind::TvSeries
+    };
+
+    (folder_kind, per_file_kinds)
 }
 
 fn normalize_title_words(raw: &str) -> HashSet<String> {
@@ -594,7 +829,6 @@ fn normalize_title_words(raw: &str) -> HashSet<String> {
         .collect()
 }
 
-/// Fuzzy-matches a messy filename's episode title hint against the fetched episode catalog.
 fn match_episode_by_title<'a>(
     hint: &str,
     season_filter: Option<u32>,
@@ -628,17 +862,16 @@ fn match_episode_by_title<'a>(
     best.map(|(_, ep)| ep)
 }
 
-/// Picks the strongest consensus show title and year across the folder name + all parsed files.
 fn infer_consensus_show(
     folder_path: Option<&Path>,
-    hints: &[ParsedVideoHints],
+    tv_hints: &[&ParsedVideoHints],
 ) -> (String, Option<u16>, Option<u32>) {
     let mut counts: HashMap<String, (usize, String)> = HashMap::new();
     let mut year_counts: HashMap<u16, usize> = HashMap::new();
     let mut season_counts: HashMap<u32, usize> = HashMap::new();
 
-    for h in hints {
-        if let Some(ref show) = h.show_guess {
+    for h in tv_hints {
+        if let Some(ref show) = h.title_guess {
             if !is_generic_stem(show) {
                 let key = show.to_ascii_lowercase();
                 let entry = counts.entry(key).or_insert((0, show.clone()));
@@ -653,7 +886,6 @@ fn infer_consensus_show(
         }
     }
 
-    // Also inspect folder name + parent folder name if files had messy/empty prefixes
     if let Some(folder) = folder_path {
         if let Some(name) = folder.file_name().and_then(|n| n.to_str()) {
             if let Some(s) = parse_folder_season_hint(name) {
@@ -668,20 +900,22 @@ fn infer_consensus_show(
                 Some(name)
             };
             if let Some(f_name) = target_folder {
-                let stripped = strip_bracketed_tags(f_name);
-                let toks: Vec<String> = stripped
-                    .split(|c: char| !c.is_ascii_alphanumeric() && c != '\'')
-                    .filter(|t| !t.is_empty())
-                    .map(str::to_string)
-                    .collect();
-                let (f_show, f_year) = clean_show_tokens(&toks);
-                if let Some(s) = f_show {
-                    let key = s.to_ascii_lowercase();
-                    let entry = counts.entry(key).or_insert((0, s));
-                    entry.0 += 1;
-                }
-                if let Some(y) = f_year {
-                    *year_counts.entry(y).or_insert(0) += 2;
+                if classify_generic_folder_name(f_name) == GenericFolderHint::Named {
+                    let stripped = strip_bracketed_tags(f_name);
+                    let toks: Vec<String> = stripped
+                        .split(|c: char| !c.is_ascii_alphanumeric() && c != '\'')
+                        .filter(|t| !t.is_empty())
+                        .map(str::to_string)
+                        .collect();
+                    let (f_show, f_year) = clean_title_tokens(&toks);
+                    if let Some(s) = f_show {
+                        let key = s.to_ascii_lowercase();
+                        let entry = counts.entry(key).or_insert((0, s));
+                        entry.0 += 1;
+                    }
+                    if let Some(y) = f_year {
+                        *year_counts.entry(y).or_insert(0) += 2;
+                    }
                 }
             }
         }
@@ -706,8 +940,32 @@ fn infer_consensus_show(
     (best_show, best_year, best_season)
 }
 
-/// Scans a folder of video files and automatically identifies the TV show, external IDs
-/// (TVDB/IMDb/TMDB), season/episode numbers, and official episode titles.
+async fn probe_all_durations(entries: &[(PathBuf, Option<u64>)]) -> Vec<Option<f64>> {
+    let Some(ffprobe) = detect::locate_optional_tool("ffprobe") else {
+        return vec![None; entries.len()];
+    };
+    let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_PROBES));
+    let mut handles = Vec::with_capacity(entries.len());
+
+    for (path, _) in entries {
+        let sem = Arc::clone(&semaphore);
+        let probe = ffprobe.clone();
+        let p = path.clone();
+        handles.push(tokio::spawn(async move {
+            let _permit = sem.acquire().await.ok()?;
+            preview::probe_video_duration_seconds(&probe, &p).await
+        }));
+    }
+
+    let mut durations = Vec::with_capacity(entries.len());
+    for h in handles {
+        durations.push(h.await.ok().flatten());
+    }
+    durations
+}
+
+/// Scans a folder of video files, probes container durations, classifies Movies vs. TV vs. Mixed,
+/// and identifies every movie and/or TV episode via available catalogs.
 pub async fn identify_video_folder(
     folder: &Path,
     config: MetadataProviderConfig,
@@ -722,7 +980,7 @@ pub async fn identify_video_folder(
     identify_entries(Some(folder), entries, config).await
 }
 
-/// Runs automatic show + episode identification over an already-selected list of local video files.
+/// Runs automatic length + marker classification and catalog identification on an existing list of files.
 pub async fn identify_video_file_list(
     paths: &[String],
     config: MetadataProviderConfig,
@@ -749,65 +1007,273 @@ async fn identify_entries(
         .iter()
         .map(|(path, _)| parse_video_filename_hints(path))
         .collect();
+    let durations = probe_all_durations(&entries).await;
 
-    let (inferred_show, inferred_year, default_season) = infer_consensus_show(folder_path, &hints);
+    let (detected_kind, per_file_kinds) =
+        classify_files_and_folder(folder_path, &hints, &durations);
     let total_size_bytes: u64 = entries.iter().filter_map(|(_, sz)| *sz).sum();
 
     let mut provider_used: Option<MetadataProvider> = None;
     let mut show_candidates: Vec<MediaMetadata> = Vec::new();
     let mut matched_show: Option<MediaMetadata> = None;
     let mut episodes_catalog: Vec<EpisodeInfo> = Vec::new();
+    let mut inferred_show = String::new();
 
-    if !inferred_show.trim().is_empty() {
-        if let Ok((prov, candidates)) =
-            metadata::auto_search_tv_series(&inferred_show, inferred_year, &config).await
-        {
-            provider_used = Some(prov);
-            if let Some(top) = candidates.first().cloned() {
-                let mut seasons_hint: Vec<u32> = hints.iter().filter_map(|h| h.season).collect();
-                if let Some(ds) = default_season {
-                    seasons_hint.push(ds);
-                }
-                if let Ok((ep_prov, eps)) =
-                    metadata::fetch_series_episodes(&top.title, &top.ids, &seasons_hint, &config)
-                        .await
-                {
-                    if !eps.is_empty() {
-                        provider_used = Some(ep_prov);
-                        episodes_catalog = eps;
+    // 1. Identify TV subset (if any files are classified as TV episodes)
+    let tv_indices: Vec<usize> = per_file_kinds
+        .iter()
+        .enumerate()
+        .filter_map(|(i, k)| (*k == MediaKind::TvEpisode).then_some(i))
+        .collect();
+    let mut tv_default_season: Option<u32> = None;
+
+    if !tv_indices.is_empty() {
+        let tv_hints: Vec<&ParsedVideoHints> = tv_indices.iter().map(|&i| &hints[i]).collect();
+        let (show_q, year_q, def_season) = infer_consensus_show(folder_path, &tv_hints);
+        inferred_show = show_q;
+        tv_default_season = def_season;
+
+        if !inferred_show.trim().is_empty() {
+            if let Ok((prov, candidates)) =
+                metadata::auto_search_tv_series(&inferred_show, year_q, &config).await
+            {
+                provider_used = Some(prov);
+                if let Some(top) = candidates.first().cloned() {
+                    let mut seasons_hint: Vec<u32> =
+                        tv_hints.iter().filter_map(|h| h.season).collect();
+                    if let Some(ds) = def_season {
+                        seasons_hint.push(ds);
                     }
+                    if let Ok((ep_prov, eps)) = metadata::fetch_series_episodes(
+                        &top.title,
+                        &top.ids,
+                        &seasons_hint,
+                        &config,
+                    )
+                    .await
+                    {
+                        if !eps.is_empty() {
+                            provider_used = Some(ep_prov);
+                            episodes_catalog = eps;
+                        }
+                    }
+                    matched_show = Some(top);
                 }
-                matched_show = Some(top);
+                show_candidates = candidates;
             }
-            show_candidates = candidates;
         }
     }
 
-    let files = match_files_to_episodes(&entries, &hints, default_season, &episodes_catalog);
+    // 2. Identify Movie subset individually & concurrently
+    let movie_indices: Vec<usize> = per_file_kinds
+        .iter()
+        .enumerate()
+        .filter_map(|(i, k)| (*k == MediaKind::Movie).then_some(i))
+        .collect();
 
-    let catalog_matched_count = files.iter().filter(|f| f.matched_from_catalog).count();
-    let status_message = match (&matched_show, provider_used) {
-        (Some(show), Some(prov)) => {
-            let prov_label = match prov {
-                MetadataProvider::Tvdb => "TVDB",
-                MetadataProvider::Tmdb => "TMDB",
-                MetadataProvider::Tvmaze => "TVMaze",
-                MetadataProvider::Imdb => "IMDb",
-            };
+    let mut movie_matches: HashMap<usize, (Option<MetadataProvider>, Vec<MediaMetadata>)> =
+        HashMap::new();
+
+    if !movie_indices.is_empty() {
+        let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_MOVIE_LOOKUPS));
+        let mut handles = Vec::with_capacity(movie_indices.len());
+
+        for idx in movie_indices {
+            let hint = hints[idx].clone();
+            let cfg = config.clone();
+            let sem = Arc::clone(&semaphore);
+            handles.push(tokio::spawn(async move {
+                let _permit = sem.acquire().await.ok()?;
+                let query = hint.title_guess.as_deref().map(str::trim).unwrap_or("");
+                if query.is_empty() || is_generic_stem(query) {
+                    return Some((idx, None, Vec::new()));
+                }
+                match metadata::auto_search_movie(query, hint.year_guess, &cfg).await {
+                    Ok((prov, results)) => Some((idx, Some(prov), results)),
+                    Err(_) => Some((idx, None, Vec::new())),
+                }
+            }));
+        }
+
+        for handle in handles {
+            if let Ok(Some((idx, prov, results))) = handle.await {
+                if provider_used.is_none() && prov.is_some() {
+                    provider_used = prov;
+                }
+                movie_matches.insert(idx, (prov, results));
+            }
+        }
+    }
+
+    // 3. Assemble TV + Movie items cleanly
+    let mut files: Vec<IdentifiedVideoFile> = Vec::with_capacity(entries.len());
+
+    // Build TV rows using episode catalog matcher
+    if !tv_indices.is_empty() {
+        let tv_entries: Vec<(PathBuf, Option<u64>)> =
+            tv_indices.iter().map(|&i| entries[i].clone()).collect();
+        let tv_hints_owned: Vec<ParsedVideoHints> =
+            tv_indices.iter().map(|&i| hints[i].clone()).collect();
+        let tv_durs: Vec<Option<f64>> = tv_indices.iter().map(|&i| durations[i]).collect();
+
+        let tv_files = match_tv_files_to_episodes(
+            &tv_entries,
+            &tv_hints_owned,
+            &tv_durs,
+            tv_default_season,
+            &episodes_catalog,
+        );
+        files.extend(tv_files);
+    }
+
+    // Build per-row Movie items
+    for (idx, ((path, size), hint)) in entries.iter().zip(hints.iter()).enumerate() {
+        if per_file_kinds[idx] != MediaKind::Movie {
+            continue;
+        }
+        let file_name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default()
+            .to_string();
+
+        let candidates = movie_matches
+            .remove(&idx)
+            .map(|(_, list)| list)
+            .unwrap_or_default();
+        let top_match = candidates.first().cloned();
+        let matched_from_catalog = top_match.is_some();
+
+        let clean_title = hint
+            .title_guess
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && !is_generic_stem(s));
+
+        let fallback_movie_meta = if top_match.is_none() {
+            clean_title.map(|t| MediaMetadata {
+                kind: MediaKind::Movie,
+                title: t.to_string(),
+                year: hint.year_guess,
+                season: None,
+                episode: None,
+                episode_title: None,
+                ids: Default::default(),
+                overview: None,
+                poster_url: None,
+            })
+        } else {
+            None
+        };
+
+        let needs_title = top_match.is_none() && clean_title.is_none();
+
+        files.push(IdentifiedVideoFile {
+            path: path.to_string_lossy().into_owned(),
+            file_name,
+            file_size_bytes: *size,
+            duration_seconds: durations[idx],
+            media_kind: MediaKind::Movie,
+            season: None,
+            episode: None,
+            episode_title: None,
+            movie_metadata: top_match.or(fallback_movie_meta),
+            movie_candidates: candidates,
+            matched_from_catalog,
+            needs_title,
+        });
+    }
+
+    // Sort Movies alphabetically by matched title (or filename) while preserving TV season/episode order
+    files.sort_by(|a, b| {
+        let kind_rank = |k: MediaKind| match k {
+            MediaKind::Movie => 0u8,
+            MediaKind::TvEpisode => 1u8,
+        };
+        let a_key = (
+            kind_rank(a.media_kind),
+            a.season.unwrap_or(u32::MAX),
+            a.episode.unwrap_or(u32::MAX),
+            a.movie_metadata
+                .as_ref()
+                .map(|m| m.title.to_ascii_lowercase())
+                .unwrap_or_else(|| a.file_name.to_ascii_lowercase()),
+        );
+        let b_key = (
+            kind_rank(b.media_kind),
+            b.season.unwrap_or(u32::MAX),
+            b.episode.unwrap_or(u32::MAX),
+            b.movie_metadata
+                .as_ref()
+                .map(|m| m.title.to_ascii_lowercase())
+                .unwrap_or_else(|| b.file_name.to_ascii_lowercase()),
+        );
+        a_key.cmp(&b_key)
+    });
+
+    let movie_total = files
+        .iter()
+        .filter(|f| f.media_kind == MediaKind::Movie)
+        .count();
+    let movie_matched = files
+        .iter()
+        .filter(|f| f.media_kind == MediaKind::Movie && f.matched_from_catalog)
+        .count();
+    let tv_total = files
+        .iter()
+        .filter(|f| f.media_kind == MediaKind::TvEpisode)
+        .count();
+    let tv_matched = files
+        .iter()
+        .filter(|f| f.media_kind == MediaKind::TvEpisode && f.matched_from_catalog)
+        .count();
+
+    let status_message = match detected_kind {
+        FolderContentKind::Movies => {
+            let needs = files.iter().filter(|f| f.needs_title).count();
+            if needs > 0 {
+                format!(
+                    "Detected {movie_total} movies · {movie_matched}/{movie_total} auto-matched · {needs} need a title (click to inspect frames)"
+                )
+            } else {
+                format!(
+                    "Detected {movie_total} movies · {movie_matched}/{movie_total} auto-matched"
+                )
+            }
+        }
+        FolderContentKind::Mixed => {
+            let show_part = matched_show
+                .as_ref()
+                .map(|s| format!(" (\"{}\")", s.title))
+                .unwrap_or_default();
             format!(
-                "Matched \"{}\" via {prov_label} · {catalog_matched_count}/{} episodes matched",
-                show.title,
-                files.len()
+                "Detected Mixed folder · {movie_total} movie{} ({movie_matched} matched) + {tv_total} TV episode{}{show_part}",
+                if movie_total == 1 { "" } else { "s" },
+                if tv_total == 1 { "" } else { "s" },
             )
         }
-        _ => format!(
-            "Loaded {} video files (parsed filenames locally — search above to match a show).",
-            files.len()
-        ),
+        FolderContentKind::TvSeries => match (&matched_show, provider_used) {
+            (Some(show), Some(prov)) => {
+                let prov_label = match prov {
+                    MetadataProvider::Tvdb => "TVDB",
+                    MetadataProvider::Tmdb => "TMDB",
+                    MetadataProvider::Tvmaze => "TVMaze",
+                    MetadataProvider::Imdb => "IMDb",
+                };
+                format!(
+                    "Detected TV series \"{}\" via {prov_label} · {tv_matched}/{tv_total} episodes matched",
+                    show.title,
+                )
+            }
+            _ => format!(
+                "Detected {tv_total} TV episodes (parsed locally — search above to match a show)."
+            ),
+        },
     };
 
     Ok(FolderIdentifyResult {
         folder_path: folder_path.map(|p| p.to_string_lossy().into_owned()),
+        detected_kind,
         inferred_show_query: inferred_show,
         provider_used,
         matched_show,
@@ -819,11 +1285,11 @@ async fn identify_entries(
     })
 }
 
-/// Maps discovered files + parsed hints against an official episode catalog and sorts
-/// the resulting rows naturally by `(season, episode, file_name)`.
-pub fn match_files_to_episodes(
+/// Maps discovered TV files + parsed hints against an official episode catalog.
+pub fn match_tv_files_to_episodes(
     entries: &[(PathBuf, Option<u64>)],
     hints: &[ParsedVideoHints],
+    durations: &[Option<f64>],
     default_season: Option<u32>,
     catalog: &[EpisodeInfo],
 ) -> Vec<IdentifiedVideoFile> {
@@ -836,8 +1302,7 @@ pub fn match_files_to_episodes(
     let mut used_episodes: HashSet<(u32, u32)> = HashSet::new();
     let mut results: Vec<IdentifiedVideoFile> = Vec::with_capacity(entries.len());
 
-    // First pass: resolve files that have explicit episode numbers or fuzzy title matches
-    for ((path, size), hint) in entries.iter().zip(hints.iter()) {
+    for (((path, size), hint), dur) in entries.iter().zip(hints.iter()).zip(durations.iter()) {
         let file_name = path
             .file_name()
             .and_then(|n| n.to_str())
@@ -853,10 +1318,8 @@ pub fn match_files_to_episodes(
             if let Some(official) = by_se.get(&(s, e)) {
                 ep_title = Some(official.title.clone());
                 matched_from_catalog = true;
-                used_episodes.insert((s, e));
-            } else {
-                used_episodes.insert((s, e));
             }
+            used_episodes.insert((s, e));
         } else if let Some(ref title_hint) = hint.episode_title_hint {
             if let Some(official) = match_episode_by_title(title_hint, hint.season, catalog) {
                 season = Some(official.season);
@@ -866,7 +1329,6 @@ pub fn match_files_to_episodes(
                 used_episodes.insert((official.season, official.episode));
             }
         } else if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-            // Try matching whole cleaned filename stem against episode titles
             if let Some(official) = match_episode_by_title(stem, Some(fallback_season), catalog) {
                 season = Some(official.season);
                 episode = Some(official.episode);
@@ -880,14 +1342,18 @@ pub fn match_files_to_episodes(
             path: path.to_string_lossy().into_owned(),
             file_name,
             file_size_bytes: *size,
+            duration_seconds: *dur,
+            media_kind: MediaKind::TvEpisode,
             season,
             episode,
             episode_title: ep_title,
+            movie_metadata: None,
+            movie_candidates: Vec::new(),
             matched_from_catalog,
+            needs_title: false,
         });
     }
 
-    // Second pass: assign sequential episode slots for completely unnumbered files (e.g. title_t00.mkv)
     let mut next_ep = 1u32;
     for item in &mut results {
         if item.episode.is_none() {
@@ -906,19 +1372,6 @@ pub fn match_files_to_episodes(
         }
     }
 
-    results.sort_by(|a, b| {
-        (
-            a.season.unwrap_or(u32::MAX),
-            a.episode.unwrap_or(u32::MAX),
-            a.file_name.to_ascii_lowercase(),
-        )
-            .cmp(&(
-                b.season.unwrap_or(u32::MAX),
-                b.episode.unwrap_or(u32::MAX),
-                b.file_name.to_ascii_lowercase(),
-            ))
-    });
-
     results
 }
 
@@ -927,98 +1380,84 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_messy_tv_filenames_and_folder_context() {
+    fn parses_messy_tv_and_movie_filenames() {
         let p1 = Path::new(
-            "/media/Breaking.Bad.S01.1080p.REMUX/Breaking.Bad.S01E01.Pilot.1080p.BluRay.REMUX.AVC.DTS-HD.MA.5.1.mkv",
+            "/media/Breaking.Bad.S01.1080p.REMUX/Breaking.Bad.S01E01.Pilot.1080p.BluRay.REMUX.mkv",
         );
         let h1 = parse_video_filename_hints(p1);
-        assert_eq!(h1.show_guess.as_deref(), Some("Breaking Bad"));
+        assert_eq!(h1.title_guess.as_deref(), Some("Breaking Bad"));
         assert_eq!(h1.season, Some(1));
         assert_eq!(h1.episode, Some(1));
-        assert_eq!(h1.episode_title_hint.as_deref(), Some("Pilot"));
+        assert!(h1.explicit_tv_marker);
 
-        let p2 = Path::new("/media/Breaking Bad (2008)/Season 01/1x02_Cats_in_the_Bag_x264.mp4");
+        let p2 = Path::new("/media/Movies/THE_MATRIX_1999_t00.mkv");
         let h2 = parse_video_filename_hints(p2);
-        assert_eq!(h2.show_guess.as_deref(), Some("Breaking Bad"));
-        assert_eq!(h2.year_guess, Some(2008));
-        assert_eq!(h2.season, Some(1));
-        assert_eq!(h2.episode, Some(2));
-        assert_eq!(h2.episode_title_hint.as_deref(), Some("Cats in the Bag"));
+        assert_eq!(h2.title_guess.as_deref(), Some("The Matrix"));
+        assert_eq!(h2.year_guess, Some(1999));
+        assert!(!h2.explicit_tv_marker);
 
-        let p3 = Path::new("/media/Mickey Mouse (2013)/Season 1/Mickey Mouse S01E04 - New York Weenie.mp4");
+        let p3 = Path::new("/media/Movies/12 Angry Men (1957).mkv");
         let h3 = parse_video_filename_hints(p3);
-        assert_eq!(h3.show_guess.as_deref(), Some("Mickey Mouse"));
-        assert_eq!(h3.season, Some(1));
-        assert_eq!(h3.episode, Some(4));
-        assert_eq!(h3.episode_title_hint.as_deref(), Some("New York Weenie"));
-
-        let p4 = Path::new("/media/The Office (2005)/Season 02/03 - Office Olympics.mkv");
-        let h4 = parse_video_filename_hints(p4);
-        assert_eq!(h4.show_guess.as_deref(), Some("The Office"));
-        assert_eq!(h4.year_guess, Some(2005));
-        assert_eq!(h4.season, Some(2));
-        assert_eq!(h4.episode, Some(3));
-        assert_eq!(h4.episode_title_hint.as_deref(), Some("Office Olympics"));
+        assert_eq!(h3.title_guess.as_deref(), Some("12 Angry Men"));
+        assert_eq!(h3.year_guess, Some(1957));
+        assert_eq!(h3.episode, None);
+        assert!(!h3.explicit_tv_marker);
     }
 
     #[test]
-    fn matches_messy_season_folder_against_official_episode_catalog() {
-        let entries = vec![
-            (
-                PathBuf::from("/tv/Breaking Bad (2008)/Season 1/title_t00.mkv"),
-                Some(24_000_000_000),
-            ),
-            (
-                PathBuf::from("/tv/Breaking Bad (2008)/Season 1/Breaking.Bad.1x03.1080p.REMUX.mkv"),
-                Some(22_500_000_000),
-            ),
-            (
-                PathBuf::from("/tv/Breaking Bad (2008)/Season 1/Cats in the Bag [15GB].mp4"),
-                Some(15_200_000_000),
-            ),
+    fn classifies_movies_tv_and_mixed_folders_by_length_and_markers() {
+        // 1. Raw unnamed MakeMKV dumps of feature films (>= 75 min) -> Movies
+        let movie_paths = [
+            Path::new("/rips/Movies/title_t00.mkv"),
+            Path::new("/rips/Movies/THE_MATRIX_1999_t01.mkv"),
+            Path::new("/rips/Movies/Inception.2010.REMUX.mkv"),
         ];
-        let hints: Vec<ParsedVideoHints> = entries
+        let movie_hints: Vec<ParsedVideoHints> = movie_paths
             .iter()
-            .map(|(p, _)| parse_video_filename_hints(p))
+            .map(|p| parse_video_filename_hints(p))
             .collect();
+        let movie_durs = [Some(6800.0), Some(8178.0), Some(8880.0)];
+        let (kind, kinds) =
+            classify_files_and_folder(Some(Path::new("/rips/Movies")), &movie_hints, &movie_durs);
+        assert_eq!(kind, FolderContentKind::Movies);
+        assert!(kinds.iter().all(|k| *k == MediaKind::Movie));
 
-        let catalog = vec![
-            EpisodeInfo {
-                season: 1,
-                episode: 1,
-                title: "Pilot".to_string(),
-            },
-            EpisodeInfo {
-                season: 1,
-                episode: 2,
-                title: "Cat's in the Bag...".to_string(),
-            },
-            EpisodeInfo {
-                season: 1,
-                episode: 3,
-                title: "...And the Bag's in the River".to_string(),
-            },
+        // 2. Long 85-minute TV episodes WITH explicit S04E01 markers -> still TV!
+        let tv_paths = [
+            Path::new("/tv/Stranger Things/Stranger.Things.S04E01.mkv"),
+            Path::new("/tv/Stranger Things/Stranger.Things.S04E02.mkv"),
         ];
-
-        let matched = match_files_to_episodes(&entries, &hints, Some(1), &catalog);
-        assert_eq!(matched.len(), 3);
-        // Sorted cleanly S01E01 -> S01E02 -> S01E03
-        assert_eq!(matched[0].episode, Some(1));
-        assert_eq!(matched[0].episode_title.as_deref(), Some("Pilot"));
-        assert!(matched[0].matched_from_catalog);
-
-        assert_eq!(matched[1].episode, Some(2));
-        assert_eq!(
-            matched[1].episode_title.as_deref(),
-            Some("Cat's in the Bag...")
+        let tv_hints: Vec<ParsedVideoHints> =
+            tv_paths.iter().map(|p| parse_video_filename_hints(p)).collect();
+        let tv_durs = [Some(5100.0), Some(4900.0)];
+        let (tv_kind, tv_kinds) = classify_files_and_folder(
+            Some(Path::new("/tv/Stranger Things")),
+            &tv_hints,
+            &tv_durs,
         );
-        assert!(matched[1].matched_from_catalog);
+        assert_eq!(tv_kind, FolderContentKind::TvSeries);
+        assert!(tv_kinds.iter().all(|k| *k == MediaKind::TvEpisode));
 
-        assert_eq!(matched[2].episode, Some(3));
-        assert_eq!(
-            matched[2].episode_title.as_deref(),
-            Some("...And the Bag's in the River")
+        // 3. Mixed folder: 1 feature film (2h28m) + 2 TV episodes (22m, S01E04 & S02E01)
+        let mixed_paths = [
+            Path::new("/rips/Unsorted/Inception.2010.mkv"),
+            Path::new("/rips/Unsorted/Mickey Mouse S1E4 - New York Weenie.mp4"),
+            Path::new("/rips/Unsorted/Mickey Mouse S2E1 - Cable Car Chaos.mp4"),
+        ];
+        let mixed_hints: Vec<ParsedVideoHints> = mixed_paths
+            .iter()
+            .map(|p| parse_video_filename_hints(p))
+            .collect();
+        let mixed_durs = [Some(8880.0), Some(215.0), Some(220.0)];
+        let (mix_kind, mix_kinds) = classify_files_and_folder(
+            Some(Path::new("/rips/Unsorted")),
+            &mixed_hints,
+            &mixed_durs,
         );
-        assert!(matched[2].matched_from_catalog);
+        assert_eq!(mix_kind, FolderContentKind::Mixed);
+        assert_eq!(
+            mix_kinds,
+            vec![MediaKind::Movie, MediaKind::TvEpisode, MediaKind::TvEpisode]
+        );
     }
 }

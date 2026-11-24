@@ -461,6 +461,44 @@ async fn probe_with_ffprobe(ffprobe: &ResolvedCommand, input_path: &Path) -> Opt
     parse_ffprobe_json(&stdout)
 }
 
+/// Fast lightweight runtime probe (`~20–40ms`) using `ffprobe` container metadata only
+/// (requires zero video decoding, so it works on all codecs even with Fedora `ffmpeg-free`).
+pub async fn probe_video_duration_seconds(
+    ffprobe: &ResolvedCommand,
+    input_path: &Path,
+) -> Option<f64> {
+    let mut cmd = Command::new(&ffprobe.program);
+    cmd.args(&ffprobe.prefix_args)
+        .args([
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+        ])
+        .arg(input_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    configure_platform_command(&mut cmd);
+
+    let child = cmd.spawn().ok()?;
+    let output = timeout(Duration::from_secs(6), child.wait_with_output())
+        .await
+        .ok()?
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|v| v.is_finite() && *v > 0.0)
+}
+
 async fn probe_with_handbrake(
     handbrake: &ResolvedCommand,
     input_path: &Path,

@@ -5,6 +5,7 @@
   import { open } from "@tauri-apps/plugin-dialog";
   import { Store } from "@tauri-apps/plugin-store";
   import FirstRunSetupModal from "./lib/FirstRunSetupModal.svelte";
+  import FolderOrganizeModal from "./lib/FolderOrganizeModal.svelte";
   import PreviewDrawer from "./lib/PreviewDrawer.svelte";
   import QueueDock from "./lib/QueueDock.svelte";
   import SettingsDropdown from "./lib/SettingsDropdown.svelte";
@@ -28,8 +29,12 @@
     DiscTitle,
     EnqueueJobRequest,
     EpisodeInfo,
+    EpisodePreviewSample,
     ExternalIds,
+    FolderContentKind,
     FolderIdentifyResult,
+    FolderOrganization,
+    FolderOrganizationPref,
     IdentifiedVideoFile,
     MediaKind,
     MediaMetadata,
@@ -82,6 +87,7 @@
     customPresetFile: null,
     minTitleLengthSeconds: 120,
     namingConvention: "plex",
+    tvFolderOrganization: "ask",
     defaultMetadataProvider: "imdb",
     omdbApiKey: null,
     tvdbApiKey: null,
@@ -109,10 +115,14 @@
   let localVideoItems = $state<IdentifiedVideoFile[]>([]);
   let checkedLocalFiles = $state<string[]>([]);
   let inspectedLocalFile = $state<string | null>(null);
+  let sourceFolderPath = $state<string | null>(null);
+  let detectedFolderKind = $state<FolderContentKind | null>(null);
+  let sharedTvShow = $state<MediaMetadata | null>(null);
   let identifyingFolder = $state(false);
   let folderIdentifyStatus = $state<string | null>(null);
   let folderShowCandidates = $state<MediaMetadata[]>([]);
   let seriesEpisodeCatalog = $state<EpisodeInfo[]>([]);
+  let organizeModalOpen = $state(false);
 
   // Auto-generated trickplay frame preview cache & state
   let trickplayCache = $state<Record<string, TrickplayPreview>>({});
@@ -237,6 +247,210 @@
     return settings.qualityProfiles[key] ?? null;
   });
 
+  function formatProviderTagFor(
+    kind: MediaKind,
+    ids: ExternalIds,
+    convention: NamingConvention,
+  ): string | null {
+    if (convention === "plain") return null;
+    const tvdb = ids.tvdbId?.trim() || null;
+    const imdb = ids.imdbId?.trim() || null;
+    const tmdb = ids.tmdbId?.trim() || null;
+    if (kind === "movie") {
+      if (convention === "plex") {
+        if (imdb) return `{imdb-${imdb}}`;
+        if (tmdb) return `{tmdb-${tmdb}}`;
+        if (tvdb) return `{tvdb-${tvdb}}`;
+      } else {
+        if (imdb) return `[imdbid-${imdb}]`;
+        if (tmdb) return `[tmdbid-${tmdb}]`;
+        if (tvdb) return `[tvdbid-${tvdb}]`;
+      }
+      return null;
+    }
+    if (convention === "plex") {
+      if (tvdb) return `{tvdb-${tvdb}}`;
+      if (imdb) return `{imdb-${imdb}}`;
+      if (tmdb) return `{tmdb-${tmdb}}`;
+    } else {
+      if (tvdb) return `[tvdbid-${tvdb}]`;
+      if (imdb) return `[imdbid-${imdb}]`;
+      if (tmdb) return `[tmdbid-${tmdb}]`;
+    }
+    return null;
+  }
+
+  const activeBatchKind = $derived.by<FolderContentKind>(() => {
+    if (workflowMode === "encodeOnly" && localVideoItems.length > 0) {
+      const selected = localVideoItems.filter((item) =>
+        checkedLocalFiles.includes(item.path),
+      );
+      const list = selected.length > 0 ? selected : localVideoItems;
+      const hasMovie = list.some((i) => i.mediaKind === "movie");
+      const hasTv = list.some((i) => i.mediaKind === "tvEpisode");
+      if (hasMovie && hasTv) return "mixed";
+      if (hasMovie) return "movies";
+      return "tvSeries";
+    }
+    return mediaKind === "tvEpisode" ? "tvSeries" : "movies";
+  });
+
+  const detectedBatchSeasons = $derived.by<number[]>(() => {
+    const set = new Set<number>();
+    if (workflowMode === "encodeOnly") {
+      const selected = localVideoItems.filter((item) =>
+        checkedLocalFiles.includes(item.path),
+      );
+      const source = selected.length > 0 ? selected : localVideoItems;
+      for (const item of source) {
+        if (item.mediaKind === "tvEpisode") {
+          set.add(item.season ?? parsedSeason);
+        }
+      }
+    } else if (mediaKind === "tvEpisode") {
+      set.add(parsedSeason);
+    }
+    return Array.from(set).sort((a, b) => a - b);
+  });
+
+  const recommendedFolderOrg = $derived.by<FolderOrganization>(() => {
+    const outDir = (
+      settings.outputDir ||
+      binaries?.defaultPaths.outputDir ||
+      ""
+    )
+      .replace(/[\\/]+$/, "")
+      .trim();
+    const lastSeg = outDir.split(/[\\/]/).pop() ?? "";
+    if (/^(?:season|series)\s*\d+$|^s\d{1,2}$/i.test(lastSeg.trim())) {
+      return "flat";
+    }
+    if (activeBatchKind === "movies") {
+      return namingConvention === "plain" ? "flat" : "showAndSeason";
+    }
+    const tvTitle = (sharedTvShow?.title || mediaTitle)
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, " ")
+      .trim();
+    const cleanSeg = lastSeg
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, " ")
+      .trim();
+    if (tvTitle.length >= 3 && cleanSeg.includes(tvTitle)) {
+      return "seasonOnly";
+    }
+    if (namingConvention === "plain" && detectedBatchSeasons.length <= 1) {
+      return "flat";
+    }
+    return "showAndSeason";
+  });
+
+  const effectivePreviewFolderOrg = $derived<FolderOrganization>(
+    settings.tvFolderOrganization === "ask"
+      ? recommendedFolderOrg
+      : settings.tvFolderOrganization,
+  );
+
+  const modalSampleItems = $derived.by<EpisodePreviewSample[]>(() => {
+    const samples: EpisodePreviewSample[] = [];
+    const seenSeasons = new Set<number>();
+    const tvIds: ExternalIds = sharedTvShow?.ids ?? {
+      imdbId: imdbId.trim() || null,
+      tvdbId: tvdbId.trim() || null,
+      tmdbId: tmdbId.trim() || null,
+    };
+    const tvTag = formatProviderTagFor("tvEpisode", tvIds, namingConvention);
+    const tvShowTitle = sharedTvShow?.title || mediaTitle.trim() || "Untitled Show";
+    const tvShowYear = sharedTvShow?.year ?? parsedYear;
+
+    if (workflowMode === "encodeOnly") {
+      const ordered = localVideoItems.filter((item) =>
+        checkedLocalFiles.includes(item.path),
+      );
+      const movies = ordered.filter((i) => i.mediaKind === "movie");
+      const tvEps = ordered.filter((i) => i.mediaKind === "tvEpisode");
+
+      // Add up to 2 movie samples (or 1 when mixed with TV)
+      const maxMovieSamples = tvEps.length > 0 ? 1 : 3;
+      for (const m of movies.slice(0, maxMovieSamples)) {
+        const meta = m.movieMetadata;
+        const mIds = meta?.ids ?? { imdbId: null, tvdbId: null, tmdbId: null };
+        samples.push({
+          kind: "movie",
+          title: meta?.title || m.fileName.replace(/\.[^.]+$/, ""),
+          year: meta?.year ?? null,
+          providerTag: formatProviderTagFor("movie", mIds, namingConvention),
+          season: null,
+          episode: null,
+          episodeTitle: null,
+        });
+      }
+
+      // Add one sample per distinct TV season (up to 3 total)
+      for (let i = 0; i < tvEps.length && samples.length < 3; i++) {
+        const item = tvEps[i];
+        const s = item.season ?? parsedSeason;
+        const e = item.episode ?? parsedStartEpisode + i;
+        if (!seenSeasons.has(s)) {
+          seenSeasons.add(s);
+          samples.push({
+            kind: "tvEpisode",
+            title: tvShowTitle,
+            year: tvShowYear,
+            providerTag: tvTag,
+            season: s,
+            episode: e,
+            episodeTitle: item.episodeTitle,
+          });
+        }
+      }
+      if (tvEps.length > 1 && samples.length < 2) {
+        const second = tvEps[1];
+        samples.push({
+          kind: "tvEpisode",
+          title: tvShowTitle,
+          year: tvShowYear,
+          providerTag: tvTag,
+          season: second.season ?? parsedSeason,
+          episode: second.episode ?? parsedStartEpisode + 1,
+          episodeTitle: second.episodeTitle,
+        });
+      }
+    } else {
+      samples.push({
+        kind: mediaKind,
+        title: mediaTitle.trim() || "Untitled",
+        year: parsedYear,
+        providerTag: formatProviderTagFor(
+          mediaKind,
+          {
+            imdbId: imdbId.trim() || null,
+            tvdbId: tvdbId.trim() || null,
+            tmdbId: tmdbId.trim() || null,
+          },
+          namingConvention,
+        ),
+        season: mediaKind === "tvEpisode" ? parsedSeason : null,
+        episode: mediaKind === "tvEpisode" ? parsedStartEpisode : null,
+        episodeTitle: null,
+      });
+    }
+
+    if (samples.length === 0) {
+      samples.push({
+        kind: mediaKind,
+        title: mediaTitle.trim() || "Untitled",
+        year: parsedYear,
+        providerTag: tvTag,
+        season: mediaKind === "tvEpisode" ? parsedSeason : null,
+        episode: mediaKind === "tvEpisode" ? parsedStartEpisode : null,
+        episodeTitle: null,
+      });
+    }
+    return samples;
+  });
+
   const activeTokenChips = $derived.by(() => {
     const chips: string[] = [];
     chips.push(mediaTitle.trim() || "Title");
@@ -284,12 +498,14 @@
     };
     const convention = namingConvention;
     const ext = workflowMode === "ripOnly" ? "mkv" : outputContainer;
+    const folderOrg = effectivePreviewFolderOrg;
 
     let cancelled = false;
     void invoke<string>("preview_output_filename", {
       media: payload,
       convention,
       extension: ext,
+      folderOrganization: folderOrg,
     })
       .then((preview) => {
         if (!cancelled) {
@@ -385,6 +601,10 @@
         (await readStoreValue<number>("minTitleLengthSeconds")) ?? 120;
       settings.namingConvention =
         (await readStoreValue<NamingConvention>("namingConvention")) ?? "plex";
+      settings.tvFolderOrganization =
+        (await readStoreValue<FolderOrganizationPref>(
+          "tvFolderOrganization",
+        )) ?? "ask";
       settings.defaultMetadataProvider =
         (await readStoreValue<MetadataProvider>("defaultMetadataProvider")) ??
         "imdb";
@@ -612,6 +832,20 @@
     return `${mb.toFixed(0)} MB`;
   }
 
+  function formatDurationShort(seconds: number | null): string {
+    if (seconds === null || !Number.isFinite(seconds) || seconds <= 0) {
+      return "";
+    }
+    const total = Math.round(seconds);
+    const h = Math.floor(total / 3600);
+    const m = Math.floor((total % 3600) / 60);
+    const s = total % 60;
+    if (h > 0) {
+      return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+    }
+    return `${m}:${String(s).padStart(2, "0")}`;
+  }
+
   function sanitizeClientFilename(input: string): string {
     return input
       .replace(/[<>:"/\\|?*]/g, " ")
@@ -625,28 +859,113 @@
     rowIndex: number,
   ): string {
     const ext = outputContainer || "mkv";
-    const baseTitle = sanitizeClientFilename(
-      mediaTitle.trim() || item.fileName.replace(/\.[^.]+$/, ""),
-    );
-    const titleWithYear = parsedYear ? `${baseTitle} (${parsedYear})` : baseTitle;
 
-    if (mediaKind === "tvEpisode") {
-      const s = item.season ?? parsedSeason;
-      const e = item.episode ?? parsedStartEpisode + rowIndex;
-      const code = `S${String(s).padStart(2, "0")}E${String(e).padStart(2, "0")}`;
-      const epTitle = item.episodeTitle
-        ? sanitizeClientFilename(item.episodeTitle)
-        : "";
-      return epTitle
-        ? `${titleWithYear} - ${code} - ${epTitle}.${ext}`
-        : `${titleWithYear} - ${code}.${ext}`;
+    if (item.mediaKind === "movie") {
+      const meta = item.movieMetadata;
+      const rawTitle =
+        meta?.title ||
+        (inspectedLocalFile === item.path && mediaTitle.trim()
+          ? mediaTitle.trim()
+          : item.fileName.replace(/\.[^.]+$/, ""));
+      const clean = sanitizeClientFilename(rawTitle) || "Untitled";
+      const yr =
+        meta?.year ?? (inspectedLocalFile === item.path ? parsedYear : null);
+      const base = yr ? `${clean} (${yr})` : clean;
+      const ids: ExternalIds = meta?.ids ?? {
+        imdbId: inspectedLocalFile === item.path ? imdbId.trim() || null : null,
+        tvdbId: null,
+        tmdbId: inspectedLocalFile === item.path ? tmdbId.trim() || null : null,
+      };
+      const tag = formatProviderTagFor("movie", ids, namingConvention);
+      const tagged = tag ? `${base} ${tag}` : base;
+      if (effectivePreviewFolderOrg === "flat") {
+        return `${tagged}.${ext}`;
+      }
+      return `${tagged}/${tagged}.${ext}`;
     }
 
-    if (localVideoItems.length > 1 && mediaTitle.trim()) {
-      const stem = sanitizeClientFilename(item.fileName.replace(/\.[^.]+$/, ""));
-      return `${titleWithYear} - ${stem}.${ext}`;
+    const tvTitle =
+      sharedTvShow?.title ||
+      (mediaKind === "tvEpisode" ? mediaTitle.trim() : "") ||
+      item.fileName.replace(/\.[^.]+$/, "");
+    const tvYear =
+      sharedTvShow?.year ?? (mediaKind === "tvEpisode" ? parsedYear : null);
+    const baseTitle = sanitizeClientFilename(tvTitle) || "Untitled";
+    const titleWithYear = tvYear ? `${baseTitle} (${tvYear})` : baseTitle;
+    const s = item.season ?? parsedSeason;
+    const e = item.episode ?? parsedStartEpisode + rowIndex;
+    const seasonPad = String(s).padStart(2, "0");
+    const code = `S${seasonPad}E${String(e).padStart(2, "0")}`;
+    const epTitle = item.episodeTitle
+      ? sanitizeClientFilename(item.episodeTitle)
+      : "";
+    const file = epTitle
+      ? `${titleWithYear} - ${code} - ${epTitle}.${ext}`
+      : `${titleWithYear} - ${code}.${ext}`;
+    if (effectivePreviewFolderOrg === "flat") {
+      return file;
     }
-    return `${titleWithYear}.${ext}`;
+    return `Season ${seasonPad}/${file}`;
+  }
+
+  function syncMetadataStripToItem(item: IdentifiedVideoFile): void {
+    if (item.mediaKind === "movie") {
+      mediaKind = "movie";
+      if (item.movieMetadata) {
+        mediaTitle = item.movieMetadata.title;
+        mediaYearInput = item.movieMetadata.year
+          ? String(item.movieMetadata.year)
+          : "";
+        imdbId = item.movieMetadata.ids.imdbId ?? "";
+        tvdbId = item.movieMetadata.ids.tvdbId ?? "";
+        tmdbId = item.movieMetadata.ids.tmdbId ?? "";
+        selectedPosterUrl = item.movieMetadata.posterUrl;
+        selectedOverview = item.movieMetadata.overview;
+      } else {
+        mediaTitle = item.needsTitle
+          ? ""
+          : item.fileName.replace(/\.[^.]+$/, "");
+        mediaYearInput = "";
+        imdbId = "";
+        tvdbId = "";
+        tmdbId = "";
+        selectedPosterUrl = null;
+        selectedOverview = null;
+      }
+    } else if (sharedTvShow) {
+      mediaKind = "tvEpisode";
+      mediaTitle = sharedTvShow.title;
+      mediaYearInput = sharedTvShow.year ? String(sharedTvShow.year) : "";
+      imdbId = sharedTvShow.ids.imdbId ?? "";
+      tvdbId = sharedTvShow.ids.tvdbId ?? "";
+      tmdbId = sharedTvShow.ids.tmdbId ?? "";
+      selectedPosterUrl = sharedTvShow.posterUrl;
+      selectedOverview = sharedTvShow.overview;
+    } else {
+      mediaKind = "tvEpisode";
+    }
+  }
+
+  function toggleItemMediaKind(path: string): void {
+    localVideoItems = localVideoItems.map((item) => {
+      if (item.path !== path) return item;
+      const nextKind: MediaKind =
+        item.mediaKind === "movie" ? "tvEpisode" : "movie";
+      return {
+        ...item,
+        mediaKind: nextKind,
+        season: nextKind === "tvEpisode" ? (item.season ?? parsedSeason) : null,
+        episode:
+          nextKind === "tvEpisode"
+            ? (item.episode ?? parsedStartEpisode)
+            : null,
+        needsTitle: nextKind === "movie" && !item.movieMetadata,
+      };
+    });
+    const updated = localVideoItems.find((i) => i.path === path);
+    if (updated && inspectedLocalFile === path) {
+      syncMetadataStripToItem(updated);
+    }
   }
 
   function applyEpisodeCatalogToItems(catalog: EpisodeInfo[]): void {
@@ -659,6 +978,7 @@
     }
 
     localVideoItems = localVideoItems.map((item, idx) => {
+      if (item.mediaKind !== "tvEpisode") return item;
       const s = item.season ?? parsedSeason;
       const e = item.episode ?? parsedStartEpisode + idx;
       const official = byKey.get(`${s}:${e}`);
@@ -702,41 +1022,40 @@
       }
     }
 
+    detectedFolderKind = res.detectedKind;
+    sharedTvShow = res.matchedShow;
     folderShowCandidates = res.showCandidates;
     seriesEpisodeCatalog = res.episodesCatalog;
     folderIdentifyStatus = res.statusMessage;
-
-    if (res.matchedShow) {
-      mediaKind = "tvEpisode";
-      mediaTitle = res.matchedShow.title;
-      mediaYearInput = res.matchedShow.year ? String(res.matchedShow.year) : "";
-      imdbId = res.matchedShow.ids.imdbId ?? "";
-      tvdbId = res.matchedShow.ids.tvdbId ?? "";
-      tmdbId = res.matchedShow.ids.tmdbId ?? "";
-      selectedPosterUrl = res.matchedShow.posterUrl;
-      selectedOverview = res.matchedShow.overview;
-      if (res.providerUsed) {
-        metadataProvider = res.providerUsed;
-      }
-    } else if (res.inferredShowQuery && !mediaTitle.trim()) {
-      mediaTitle = res.inferredShowQuery;
-      if (res.files.some((f) => f.episode !== null)) {
-        mediaKind = "tvEpisode";
-      }
+    if (res.folderPath) {
+      sourceFolderPath = res.folderPath;
     }
 
-    const firstSeason = res.files.find((f) => f.season !== null)?.season;
+    if (res.providerUsed) {
+      metadataProvider = res.providerUsed;
+    }
+
+    const firstSeason = res.files.find(
+      (f) => f.mediaKind === "tvEpisode" && f.season !== null,
+    )?.season;
     if (firstSeason !== undefined && firstSeason !== null) {
       seasonInput = String(firstSeason);
     }
-    const firstEp = res.files.find((f) => f.episode !== null)?.episode;
+    const firstEp = res.files.find(
+      (f) => f.mediaKind === "tvEpisode" && f.episode !== null,
+    )?.episode;
     if (firstEp !== undefined && firstEp !== null) {
       startEpisodeInput = String(firstEp);
     }
 
     if (res.files.length > 0) {
-      inspectedLocalFile = res.files[0].path;
+      const first = res.files[0];
+      inspectedLocalFile = first.path;
       previewOpen = true;
+      syncMetadataStripToItem(first);
+      if (!res.matchedShow && res.inferredShowQuery && first.mediaKind === "tvEpisode") {
+        mediaTitle = res.inferredShowQuery;
+      }
     }
   }
 
@@ -826,6 +1145,9 @@
     localVideoItems = [];
     checkedLocalFiles = [];
     inspectedLocalFile = null;
+    sourceFolderPath = null;
+    detectedFolderKind = null;
+    sharedTvShow = null;
     folderIdentifyStatus = null;
     folderShowCandidates = [];
     seriesEpisodeCatalog = [];
@@ -861,10 +1183,15 @@
           path: p,
           fileName: fileBaseName(p),
           fileSizeBytes: null,
+          durationSeconds: null,
+          mediaKind: mediaKind,
           season: null,
           episode: null,
           episodeTitle: null,
+          movieMetadata: null,
+          movieCandidates: [],
           matchedFromCatalog: false,
+          needsTitle: false,
         }));
         localVideoItems = [...localVideoItems, ...newItems];
         checkedLocalFiles = [...checkedLocalFiles, ...addedPaths];
@@ -923,6 +1250,10 @@
   function inspectLocalFile(path: string): void {
     inspectedLocalFile = path;
     previewOpen = true;
+    const found = localVideoItems.find((i) => i.path === path);
+    if (found && detectedFolderKind !== null) {
+      syncMetadataStripToItem(found);
+    }
   }
 
   function inspectTitle(titleId: number): void {
@@ -1270,7 +1601,39 @@
     };
   }
 
-  async function handleEnqueueSelected(): Promise<void> {
+  function handleRequestEnqueue(): void {
+    if (!modeReady || selectedCount === 0 || queueingJobs) return;
+    const shouldPrompt =
+      settings.tvFolderOrganization === "ask" &&
+      (activeBatchKind === "tvSeries" ||
+        activeBatchKind === "mixed" ||
+        (activeBatchKind === "movies" &&
+          (selectedCount > 1 || workflowMode === "encodeOnly")));
+    if (shouldPrompt) {
+      organizeModalOpen = true;
+      return;
+    }
+    const org: FolderOrganization | null =
+      settings.tvFolderOrganization !== "ask"
+        ? settings.tvFolderOrganization
+        : null;
+    void executeEnqueueSelected(org);
+  }
+
+  function handleConfirmFolderOrganization(
+    org: FolderOrganization,
+    saveAsDefault: boolean,
+  ): void {
+    organizeModalOpen = false;
+    if (saveAsDefault) {
+      updateSetting("tvFolderOrganization", org);
+    }
+    void executeEnqueueSelected(org);
+  }
+
+  async function executeEnqueueSelected(
+    folderOrg: FolderOrganization | null,
+  ): Promise<void> {
     if (!modeReady || selectedCount === 0) return;
     queueingJobs = true;
     queueActionError = null;
@@ -1289,39 +1652,103 @@
         );
         ordered.forEach((item, idx) => {
           const base = item.fileName.replace(/\.[^.]+$/, "");
-          const epSeason = item.season ?? parsedSeason;
-          const epNum = item.episode ?? parsedStartEpisode + idx;
-          const epCode = `S${String(epSeason).padStart(2, "0")}E${String(epNum).padStart(2, "0")}`;
-          const titleLabel =
-            mediaTitle.trim() && mediaKind === "tvEpisode"
-              ? item.episodeTitle
-                ? `${mediaTitle.trim()} ${epCode} - ${item.episodeTitle}`
-                : `${mediaTitle.trim()} ${epCode}`
-              : ordered.length === 1 && mediaTitle.trim()
-                ? mediaTitle.trim()
-                : base;
-          requests.push({
-            mode: "encodeOnly",
-            discName: "Local File",
-            driveIndex: null,
-            driveDevicePath: null,
-            titleId: null,
-            sourceFilePath: item.path,
-            titleName: titleLabel,
-            qualityProfile: activeQualityProfile,
-            customPresetFile: settings.customPresetFile,
-            customPresetName: settings.defaultPreset,
-            tempDir: effectiveTempDir,
-            outputDir: effectiveOutputDir,
-            keepTempMkv: settings.keepTempMkv,
-            autoEjectDisc: false,
-            namingConvention,
-            mediaMetadata: buildJobMetadata(idx, base, ordered.length, {
-              season: item.season,
-              episode: item.episode,
-              episodeTitle: item.episodeTitle,
-            }),
-          });
+
+          if (item.mediaKind === "movie") {
+            const meta: MediaMetadata = item.movieMetadata
+              ? { ...item.movieMetadata, kind: "movie" }
+              : {
+                  kind: "movie",
+                  title:
+                    inspectedLocalFile === item.path && mediaTitle.trim()
+                      ? mediaTitle.trim()
+                      : ordered.length === 1 && mediaTitle.trim()
+                        ? mediaTitle.trim()
+                        : base,
+                  year:
+                    inspectedLocalFile === item.path || ordered.length === 1
+                      ? parsedYear
+                      : null,
+                  season: null,
+                  episode: null,
+                  episodeTitle: null,
+                  ids:
+                    inspectedLocalFile === item.path || ordered.length === 1
+                      ? {
+                          imdbId: imdbId.trim() || null,
+                          tvdbId: tvdbId.trim() || null,
+                          tmdbId: tmdbId.trim() || null,
+                        }
+                      : { imdbId: null, tvdbId: null, tmdbId: null },
+                  overview: null,
+                  posterUrl: null,
+                };
+            const titleLabel = meta.year
+              ? `${meta.title} (${meta.year})`
+              : meta.title;
+            requests.push({
+              mode: "encodeOnly",
+              discName: "Local Movie",
+              driveIndex: null,
+              driveDevicePath: null,
+              titleId: null,
+              sourceFilePath: item.path,
+              titleName: titleLabel,
+              qualityProfile: activeQualityProfile,
+              customPresetFile: settings.customPresetFile,
+              customPresetName: settings.defaultPreset,
+              tempDir: effectiveTempDir,
+              outputDir: effectiveOutputDir,
+              keepTempMkv: settings.keepTempMkv,
+              autoEjectDisc: false,
+              namingConvention,
+              folderOrganization: folderOrg,
+              mediaMetadata: meta,
+            });
+          } else {
+            const tvTitle =
+              sharedTvShow?.title || mediaTitle.trim() || base;
+            const tvYear = sharedTvShow?.year ?? parsedYear;
+            const tvIds: ExternalIds = sharedTvShow?.ids ?? {
+              imdbId: imdbId.trim() || null,
+              tvdbId: tvdbId.trim() || null,
+              tmdbId: tmdbId.trim() || null,
+            };
+            const epSeason = item.season ?? parsedSeason;
+            const epNum = item.episode ?? parsedStartEpisode + idx;
+            const epCode = `S${String(epSeason).padStart(2, "0")}E${String(epNum).padStart(2, "0")}`;
+            const titleLabel = item.episodeTitle
+              ? `${tvTitle} ${epCode} - ${item.episodeTitle}`
+              : `${tvTitle} ${epCode}`;
+            requests.push({
+              mode: "encodeOnly",
+              discName: "Local File",
+              driveIndex: null,
+              driveDevicePath: null,
+              titleId: null,
+              sourceFilePath: item.path,
+              titleName: titleLabel,
+              qualityProfile: activeQualityProfile,
+              customPresetFile: settings.customPresetFile,
+              customPresetName: settings.defaultPreset,
+              tempDir: effectiveTempDir,
+              outputDir: effectiveOutputDir,
+              keepTempMkv: settings.keepTempMkv,
+              autoEjectDisc: false,
+              namingConvention,
+              folderOrganization: folderOrg,
+              mediaMetadata: {
+                kind: "tvEpisode",
+                title: tvTitle,
+                year: tvYear,
+                season: epSeason,
+                episode: epNum,
+                episodeTitle: item.episodeTitle,
+                ids: tvIds,
+                overview: sharedTvShow?.overview ?? selectedOverview,
+                posterUrl: sharedTvShow?.posterUrl ?? selectedPosterUrl,
+              },
+            });
+          }
         });
       } else {
         const ordered = titles.filter((t) =>
@@ -1354,6 +1781,7 @@
             keepTempMkv: settings.keepTempMkv,
             autoEjectDisc: settings.autoEjectDisc && idx === ordered.length - 1,
             namingConvention,
+            folderOrganization: folderOrg,
             mediaMetadata: buildJobMetadata(idx, fallback, ordered.length),
           });
         });
@@ -1514,36 +1942,72 @@
       }
     }
 
-    // When picking a TV show with local files loaded, fetch official episode titles
-    // and re-apply uniform episode naming across every row automatically.
-    if (item.kind === "tvEpisode" && localVideoItems.length > 0) {
-      try {
-        const seasonsHint = Array.from(
-          new Set(
-            localVideoItems
-              .map((f) => f.season)
-              .filter((s): s is number => s !== null),
-          ),
-        );
-        const [prov, episodes] = await invoke<
-          [MetadataProvider, EpisodeInfo[]]
-        >("fetch_series_episodes", {
-          title: item.title,
-          ids: {
-            imdbId: imdbId.trim() || null,
-            tvdbId: tvdbId.trim() || null,
-            tmdbId: tmdbId.trim() || null,
-          },
-          seasonsHint: seasonsHint.length > 0 ? seasonsHint : [parsedSeason],
-          config: currentMetadataConfig(),
-        });
-        applyEpisodeCatalogToItems(episodes);
-        const matchedCount = localVideoItems.filter(
-          (f) => f.matchedFromCatalog,
-        ).length;
-        folderIdentifyStatus = `Matched "${item.title}" via ${prov.toUpperCase()} · ${matchedCount}/${localVideoItems.length} episodes matched`;
-      } catch {
-        // Keep user's show selection even if episode catalog lookup fails.
+    // When in Encode Only with a specific Movie row selected, assign this match to THAT row
+    if (
+      workflowMode === "encodeOnly" &&
+      inspectedLocalFile &&
+      item.kind === "movie" &&
+      localVideoItems.some((f) => f.path === inspectedLocalFile)
+    ) {
+      const hydrated: MediaMetadata = {
+        ...item,
+        ids: {
+          imdbId: imdbId.trim() || null,
+          tvdbId: tvdbId.trim() || null,
+          tmdbId: tmdbId.trim() || null,
+        },
+      };
+      localVideoItems = localVideoItems.map((row) =>
+        row.path === inspectedLocalFile
+          ? {
+              ...row,
+              mediaKind: "movie",
+              movieMetadata: hydrated,
+              matchedFromCatalog: true,
+              needsTitle: false,
+            }
+          : row,
+      );
+      return;
+    }
+
+    // When picking a TV show with local files loaded, update shared TV identity,
+    // fetch official episode titles, and re-apply uniform episode naming across TV rows.
+    if (item.kind === "tvEpisode") {
+      sharedTvShow = {
+        ...item,
+        ids: {
+          imdbId: imdbId.trim() || null,
+          tvdbId: tvdbId.trim() || null,
+          tmdbId: tmdbId.trim() || null,
+        },
+      };
+      const tvRows = localVideoItems.filter((f) => f.mediaKind === "tvEpisode");
+      if (tvRows.length > 0) {
+        try {
+          const seasonsHint = Array.from(
+            new Set(
+              tvRows
+                .map((f) => f.season)
+                .filter((s): s is number => s !== null),
+            ),
+          );
+          const [prov, episodes] = await invoke<
+            [MetadataProvider, EpisodeInfo[]]
+          >("fetch_series_episodes", {
+            title: item.title,
+            ids: sharedTvShow.ids,
+            seasonsHint: seasonsHint.length > 0 ? seasonsHint : [parsedSeason],
+            config: currentMetadataConfig(),
+          });
+          applyEpisodeCatalogToItems(episodes);
+          const matchedCount = localVideoItems.filter(
+            (f) => f.mediaKind === "tvEpisode" && f.matchedFromCatalog,
+          ).length;
+          folderIdentifyStatus = `Matched "${item.title}" via ${prov.toUpperCase()} · ${matchedCount}/${tvRows.length} episodes matched`;
+        } catch {
+          // Keep user's show selection even if episode catalog lookup fails.
+        }
       }
     }
   }
@@ -1952,7 +2416,7 @@
 
       <button
         type="button"
-        onclick={() => void handleEnqueueSelected()}
+        onclick={handleRequestEnqueue}
         disabled={!modeReady || selectedCount === 0 || queueingJobs}
         class="rounded-md bg-[#111111] px-3.5 py-1.5 text-xs font-semibold text-white transition hover:bg-[#2A2A2A] disabled:cursor-not-allowed disabled:bg-[#C9C7C0] disabled:text-[#6B6A65]"
       >
@@ -2310,6 +2774,15 @@
           </div>
 
           <div class="flex shrink-0 items-center gap-1.5">
+            {#if mediaKind === "tvEpisode" && detectedBatchSeasons.length > 1}
+              <span
+                class="rounded-full border border-[#B5DAFA] bg-[#DCEEFF] px-2 py-0.5 font-mono text-[10px] font-semibold text-[#155CA2]"
+              >
+                {detectedBatchSeasons.length} seasons ({detectedBatchSeasons
+                  .map((s) => `S${String(s).padStart(2, "0")}`)
+                  .join(", ")})
+              </span>
+            {/if}
             {#if folderShowCandidates.length > 1}
               <button
                 type="button"
@@ -2346,9 +2819,9 @@
               class="h-3.5 w-3.5 accent-[#111111]"
             />
           </div>
-          <div class="col-span-2">{mediaKind === "tvEpisode" ? "Episode" : "#"}</div>
-          <div class="col-span-6">Source File → Uniform Output Name</div>
-          <div class="col-span-1 text-right">Size</div>
+          <div class="col-span-2">Type / Episode</div>
+          <div class="col-span-5">Source File → Uniform Output Name</div>
+          <div class="col-span-2 text-right">Length / Size</div>
           <div class="col-span-2 text-right">Actions</div>
         </div>
       {:else}
@@ -2445,8 +2918,15 @@
                   </div>
 
                   <div class="col-span-2 flex items-center gap-1">
-                    {#if mediaKind === "tvEpisode"}
-                      <span class="font-mono text-[10px] font-bold text-[#787772]">S</span>
+                    {#if item.mediaKind === "tvEpisode"}
+                      <button
+                        type="button"
+                        onclick={() => toggleItemMediaKind(item.path)}
+                        title="Detected as TV episode (click to switch to Movie)"
+                        class="rounded border border-[#B5DAFA] bg-[#DCEEFF] px-1 py-0.5 font-mono text-[9px] font-bold uppercase text-[#155CA2] hover:bg-[#CBE5FE]"
+                      >
+                        TV
+                      </button>
                       <input
                         type="text"
                         inputmode="numeric"
@@ -2458,9 +2938,9 @@
                             "season",
                             e.currentTarget.value,
                           )}
-                        class="w-9 rounded border border-[#DFDDD6] bg-white px-1 py-0.5 text-center font-mono text-[11px] font-semibold text-[#111111] outline-none focus:border-[#1D8BF8]"
+                        class="w-7 rounded border border-[#DFDDD6] bg-white px-0.5 py-0.5 text-center font-mono text-[10px] font-semibold text-[#111111] outline-none focus:border-[#1D8BF8]"
                       />
-                      <span class="font-mono text-[10px] font-bold text-[#787772]">E</span>
+                      <span class="font-mono text-[9px] text-[#787772]">×</span>
                       <input
                         type="text"
                         inputmode="numeric"
@@ -2472,19 +2952,44 @@
                             "episode",
                             e.currentTarget.value,
                           )}
-                        class="w-9 rounded border border-[#DFDDD6] bg-white px-1 py-0.5 text-center font-mono text-[11px] font-semibold text-[#111111] outline-none focus:border-[#1D8BF8]"
+                        class="w-7 rounded border border-[#DFDDD6] bg-white px-0.5 py-0.5 text-center font-mono text-[10px] font-semibold text-[#111111] outline-none focus:border-[#1D8BF8]"
                       />
                     {:else}
-                      <span class="font-mono text-[11px] text-[#787772]">
-                        #{idx + 1}
-                      </span>
+                      <button
+                        type="button"
+                        onclick={() => toggleItemMediaKind(item.path)}
+                        title="Detected as Movie (click to switch to TV episode)"
+                        class="rounded border border-[#B3E8CB] bg-[#E3F9EC] px-1.5 py-0.5 font-mono text-[9px] font-bold uppercase text-[#17462B] hover:bg-[#CEF5DF]"
+                      >
+                        Movie
+                      </button>
+                      {#if item.needsTitle}
+                        <button
+                          type="button"
+                          onclick={() => inspectLocalFile(item.path)}
+                          class="rounded border border-[#E6C575] bg-[#FEF7E4] px-1.5 py-0.5 text-[9px] font-semibold text-[#5C4107]"
+                        >
+                          Needs title
+                        </button>
+                      {:else if item.movieCandidates.length > 1}
+                        <button
+                          type="button"
+                          onclick={() => {
+                            inspectLocalFile(item.path);
+                            searchResults = item.movieCandidates;
+                          }}
+                          class="rounded border border-[#E5E3DD] bg-white px-1.5 py-0.5 text-[9px] font-semibold text-[#5C5B57] hover:text-[#111111]"
+                        >
+                          Switch
+                        </button>
+                      {/if}
                     {/if}
                   </div>
 
                   <button
                     type="button"
                     onclick={() => inspectLocalFile(item.path)}
-                    class="col-span-6 min-w-0 text-left"
+                    class="col-span-5 min-w-0 text-left"
                     title={item.path}
                   >
                     <div class="flex items-center gap-1.5">
@@ -2493,7 +2998,7 @@
                       </span>
                       {#if item.matchedFromCatalog}
                         <span
-                          title="Episode matched from official catalog"
+                          title="Matched from online catalog"
                           class="h-1.5 w-1.5 shrink-0 rounded-full bg-[#3AD27E]"
                         ></span>
                       {/if}
@@ -2506,14 +3011,19 @@
                     </div>
                   </button>
 
-                  <div
-                    class={`col-span-1 text-right font-mono text-[11px] ${
-                      (item.fileSizeBytes ?? 0) >= 8_000_000_000
+                  <div class="col-span-2 text-right font-mono text-[11px]">
+                    {#if item.durationSeconds}
+                      <span class="text-[#787772]">
+                        {formatDurationShort(item.durationSeconds)} ·
+                      </span>
+                    {/if}
+                    <span
+                      class={(item.fileSizeBytes ?? 0) >= 8_000_000_000
                         ? "font-semibold text-[#B4690E]"
-                        : "text-[#52524E]"
-                    }`}
-                  >
-                    {formatBytesHuman(item.fileSizeBytes)}
+                        : "text-[#52524E]"}
+                    >
+                      {formatBytesHuman(item.fileSizeBytes)}
+                    </span>
                   </div>
 
                   <div class="col-span-2 flex items-center justify-end gap-2">
@@ -2725,6 +3235,29 @@
     onBrowseDirectory={(target) => void browseDirectory(target)}
     onResetDirectory={(target) => updateSetting(target, null)}
     onBrowseCustomPreset={() => void browseCustomPresetFile()}
+  />
+
+  <!-- Folder Organization Prompt (when encoding Movie, TV, or Mixed batches) -->
+  <FolderOrganizeModal
+    open={organizeModalOpen}
+    batchKind={activeBatchKind}
+    showTitle={sharedTvShow?.title || mediaTitle}
+    {namingConvention}
+    outputExtension={workflowMode === "ripOnly" ? "mkv" : outputContainer}
+    outputDir={resolvedOutputDir}
+    {sourceFolderPath}
+    selectedFileCount={selectedCount}
+    detectedSeasons={detectedBatchSeasons}
+    sampleItems={modalSampleItems}
+    recommendedOrg={recommendedFolderOrg}
+    onBrowseOutputDir={() => void browseDirectory("outputDir")}
+    onUseSourceFolderAsOutput={() => {
+      if (sourceFolderPath) {
+        updateSetting("outputDir", sourceFolderPath);
+      }
+    }}
+    onConfirm={handleConfirmFolderOrganization}
+    onCancel={() => (organizeModalOpen = false)}
   />
 
   <!-- First-Run Onboarding Modal (auto-skipped when both CLIs are already installed) -->
