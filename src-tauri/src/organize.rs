@@ -845,7 +845,9 @@ mod tests {
             year: Some(2008),
             season: Some(season),
             episode: Some(episode),
+            episode_end: None,
             episode_title: Some(ep_title.to_string()),
+            extra_type: None,
             ids: ExternalIds {
                 imdb_id: Some("tt0903747".to_string()),
                 tvdb_id: Some("81189".to_string()),
@@ -928,7 +930,9 @@ mod tests {
             year: Some(1999),
             season: None,
             episode: None,
+            episode_end: None,
             episode_title: None,
+            extra_type: None,
             ids: ExternalIds {
                 imdb_id: Some("tt0133093".to_string()),
                 tvdb_id: None,

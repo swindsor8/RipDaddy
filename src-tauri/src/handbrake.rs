@@ -277,8 +277,41 @@ pub fn recommended_quality_profiles() -> Vec<QualityProfile> {
 }
 
 /// Builds the HandBrakeCLI quality, resolution, audio, container, and subtitle flags
-/// for a given `QualityProfile` (excluding `-i` and `-o`).
-pub fn build_quality_flags(profile: &QualityProfile) -> Vec<String> {
+/// Optional per-job audio/subtitle track indices (1-based) and preferred ISO-639-2 language
+/// lists passed to `HandBrakeCLI` (`--audio`, `--audio-lang-list`, `--subtitle`, `--subtitle-lang-list`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackSelectionOptions {
+    #[serde(default)]
+    pub selected_audio_tracks: Option<Vec<u32>>,
+    #[serde(default)]
+    pub selected_subtitle_tracks: Option<Vec<u32>>,
+    #[serde(default)]
+    pub audio_languages: Vec<String>,
+    #[serde(default)]
+    pub subtitle_languages: Vec<String>,
+}
+
+fn clean_lang_codes(langs: &[String]) -> Vec<String> {
+    langs
+        .iter()
+        .map(|s| {
+            s.trim()
+                .chars()
+                .filter(|c| c.is_ascii_alphabetic())
+                .collect::<String>()
+                .to_ascii_lowercase()
+        })
+        .filter(|s| (2..=3).contains(&s.len()))
+        .collect()
+}
+
+/// Builds the full HandBrakeCLI flag vector (excluding `-i` and `-o`) with optional explicit
+/// track selection and preferred ISO-639-2 audio/subtitle language filters.
+pub fn build_quality_flags_with_tracks(
+    profile: &QualityProfile,
+    tracks: &TrackSelectionOptions,
+) -> Vec<String> {
     let (max_w, max_h) = profile.resolution.max_dimensions();
     let format_flag = if profile.container.eq_ignore_ascii_case("mp4") {
         "av_mp4"
@@ -312,9 +345,37 @@ pub fn build_quality_flags(profile: &QualityProfile) -> Vec<String> {
         args.push("--optimize".to_string());
     }
 
+    // Audio track selection / language preference
+    let explicit_audio: Vec<u32> = tracks
+        .selected_audio_tracks
+        .as_ref()
+        .map(|list| list.iter().copied().filter(|&n| n > 0).collect())
+        .unwrap_or_default();
+    let audio_langs = clean_lang_codes(&tracks.audio_languages);
+
+    if !explicit_audio.is_empty() {
+        args.push("--audio".to_string());
+        args.push(
+            explicit_audio
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(","),
+        );
+    } else if !audio_langs.is_empty() {
+        args.push("--audio-lang-list".to_string());
+        args.push(audio_langs.join(","));
+        if profile.audio_mode == AudioMode::Passthrough {
+            args.push("--all-audio".to_string());
+        } else {
+            args.push("--first-audio".to_string());
+        }
+    } else if profile.audio_mode == AudioMode::Passthrough {
+        args.push("--all-audio".to_string());
+    }
+
     match profile.audio_mode {
         AudioMode::Passthrough => {
-            args.push("--all-audio".to_string());
             args.push("--aencoder".to_string());
             args.push("copy:truehd,copy:dtshd,copy:dts,copy:eac3,copy:ac3,av_aac".to_string());
             args.push("--audio-fallback".to_string());
@@ -340,19 +401,62 @@ pub fn build_quality_flags(profile: &QualityProfile) -> Vec<String> {
         }
     }
 
-    match profile.subtitle_mode {
-        SubtitleMode::All => {
-            args.push("--all-subtitles".to_string());
-        }
-        SubtitleMode::ForeignScan => {
+    // Subtitle track selection / language preference
+    let sub_langs = clean_lang_codes(&tracks.subtitle_languages);
+    if let Some(ref explicit_subs) = tracks.selected_subtitle_tracks {
+        let valid: Vec<u32> = explicit_subs.iter().copied().filter(|&n| n > 0).collect();
+        if !valid.is_empty() {
             args.push("--subtitle".to_string());
-            args.push("scan".to_string());
-            args.push("--subtitle-forced".to_string());
+            args.push(
+                valid
+                    .iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(","),
+            );
         }
-        SubtitleMode::None => {}
+    } else {
+        if !sub_langs.is_empty() && profile.subtitle_mode != SubtitleMode::None {
+            args.push("--subtitle-lang-list".to_string());
+            args.push(sub_langs.join(","));
+        }
+        match profile.subtitle_mode {
+            SubtitleMode::All => {
+                args.push("--all-subtitles".to_string());
+            }
+            SubtitleMode::ForeignScan => {
+                args.push("--subtitle".to_string());
+                args.push("scan".to_string());
+                args.push("--subtitle-forced".to_string());
+            }
+            SubtitleMode::None => {}
+        }
     }
 
     args.extend(profile.extra_args.iter().cloned());
+    args
+}
+
+/// for a given `QualityProfile` (excluding `-i` and `-o`).
+pub fn build_quality_flags(profile: &QualityProfile) -> Vec<String> {
+    build_quality_flags_with_tracks(profile, &TrackSelectionOptions::default())
+}
+
+/// Builds a complete `HandBrakeCLI --json` invocation from a `QualityProfile` and track options.
+pub fn build_quality_profile_encode_args_with_tracks(
+    input_path: &Path,
+    output_path: &Path,
+    profile: &QualityProfile,
+    tracks: &TrackSelectionOptions,
+) -> Vec<String> {
+    let mut args = vec![
+        "--json".to_string(),
+        "-i".to_string(),
+        input_path.to_string_lossy().into_owned(),
+        "-o".to_string(),
+        output_path.to_string_lossy().into_owned(),
+    ];
+    args.extend(build_quality_flags_with_tracks(profile, tracks));
     args
 }
 
@@ -362,15 +466,12 @@ pub fn build_quality_profile_encode_args(
     output_path: &Path,
     profile: &QualityProfile,
 ) -> Vec<String> {
-    let mut args = vec![
-        "--json".to_string(),
-        "-i".to_string(),
-        input_path.to_string_lossy().into_owned(),
-        "-o".to_string(),
-        output_path.to_string_lossy().into_owned(),
-    ];
-    args.extend(build_quality_flags(profile));
-    args
+    build_quality_profile_encode_args_with_tracks(
+        input_path,
+        output_path,
+        profile,
+        &TrackSelectionOptions::default(),
+    )
 }
 
 /// High-level encoding state reported by HandBrakeCLI `--json`.

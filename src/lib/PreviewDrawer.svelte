@@ -32,6 +32,8 @@
     trickplay: TrickplayPreview | null;
     loadingTrickplay: boolean;
     trickplayError: string | null;
+    excludedStreamIds?: number[];
+    onToggleTrack?: (streamId: number) => void;
     onRegenerateFrames: () => void;
     onClose: () => void;
     onEditQuality: () => void;
@@ -52,6 +54,8 @@
     trickplay,
     loadingTrickplay,
     trickplayError,
+    excludedStreamIds = [],
+    onToggleTrack,
     onRegenerateFrames,
     onClose,
     onEditQuality,
@@ -662,23 +666,53 @@
         </div>
       </div>
 
-      <!-- Stream Pills -->
+      <!-- Interactive Stream Pills -->
       <div class="space-y-2">
-        <div
-          class="text-[10px] font-bold uppercase tracking-[0.08em] text-[#7D716A]"
-        >
-          Streams ({selectedTitle.streams.length})
+        <div class="flex items-center justify-between gap-2">
+          <span
+            class="text-[10px] font-bold uppercase tracking-[0.08em] text-[#7D716A]"
+          >
+            Streams ({selectedTitle.streams.length})
+          </span>
+          {#if onToggleTrack && selectedTitle.streams.some((t) => t.trackType === "audio" || t.trackType === "subtitle")}
+            <span class="text-[10px] text-[#7D716A]">
+              Click audio/subs to toggle
+            </span>
+          {/if}
         </div>
         {#if selectedTitle.streams.length === 0}
           <p class="text-[11px] text-[#7D716A]">No streams reported.</p>
         {:else}
           <div class="flex flex-wrap gap-1.5">
             {#each selectedTitle.streams as track (track.streamId)}
-              <span
-                class={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-semibold ${trackBadgeClass(track)}`}
-              >
-                {formatTrackSummary(track)}
-              </span>
+              {@const toggleable =
+                Boolean(onToggleTrack) &&
+                (track.trackType === "audio" || track.trackType === "subtitle")}
+              {@const excluded = excludedStreamIds.includes(track.streamId)}
+              {#if toggleable}
+                <button
+                  type="button"
+                  onclick={() => onToggleTrack?.(track.streamId)}
+                  aria-pressed={!excluded}
+                  title={excluded
+                    ? `Excluded ${track.trackType} track — click to include in encode`
+                    : `Included ${track.trackType} track — click to exclude from encode`}
+                  class={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-semibold transition ${
+                    excluded
+                      ? "border-dashed border-[#D6CFC3] bg-[#FAF8F4] text-[#9E928B] line-through opacity-75 hover:border-[#1A1513] hover:text-[#1A1513]"
+                      : `${trackBadgeClass(track)} hover:brightness-95`
+                  }`}
+                >
+                  <span>{excluded ? "✕" : "✓"}</span>
+                  <span>{formatTrackSummary(track)}</span>
+                </button>
+              {:else}
+                <span
+                  class={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-semibold ${trackBadgeClass(track)}`}
+                >
+                  {formatTrackSummary(track)}
+                </span>
+              {/if}
             {/each}
           </div>
         {/if}

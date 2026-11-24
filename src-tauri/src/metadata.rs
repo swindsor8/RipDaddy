@@ -91,6 +91,36 @@ impl ExternalIds {
     }
 }
 
+/// Optional Plex/Jellyfin inline extra tag for Blu-ray/DVD bonus tracks & featurettes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MediaExtraType {
+    BehindTheScenes,
+    Deleted,
+    Featurette,
+    Interview,
+    Scene,
+    Short,
+    Trailer,
+    Other,
+}
+
+impl MediaExtraType {
+    /// Standard Plex & Jellyfin inline filename suffix (e.g. `-behindthescenes`).
+    pub fn filename_suffix(self) -> &'static str {
+        match self {
+            MediaExtraType::BehindTheScenes => "-behindthescenes",
+            MediaExtraType::Deleted => "-deleted",
+            MediaExtraType::Featurette => "-featurette",
+            MediaExtraType::Interview => "-interview",
+            MediaExtraType::Scene => "-scene",
+            MediaExtraType::Short => "-short",
+            MediaExtraType::Trailer => "-trailer",
+            MediaExtraType::Other => "-other",
+        }
+    }
+}
+
 /// Media titling payload attached to a title, encode job, or lookup search result.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -100,7 +130,11 @@ pub struct MediaMetadata {
     pub year: Option<u16>,
     pub season: Option<u32>,
     pub episode: Option<u32>,
+    #[serde(default)]
+    pub episode_end: Option<u32>,
     pub episode_title: Option<String>,
+    #[serde(default)]
+    pub extra_type: Option<MediaExtraType>,
     pub ids: ExternalIds,
     pub overview: Option<String>,
     pub poster_url: Option<String>,
@@ -404,26 +438,68 @@ pub fn format_output_relative_path_with_org(
     };
 
     match meta.kind {
-        MediaKind::Movie => match organization {
-            FolderOrganization::Flat => match convention {
-                NamingConvention::Plain => format!("{base_name}.{ext}"),
-                NamingConvention::Plex | NamingConvention::Jellyfin => {
-                    format!("{tagged_base}.{ext}")
-                }
-            },
-            FolderOrganization::ShowAndSeason | FolderOrganization::SeasonOnly => {
-                match convention {
-                    NamingConvention::Plain => format!("{base_name}/{base_name}.{ext}"),
+        MediaKind::Movie => {
+            if let Some(extra) = meta.extra_type {
+                let extra_name = meta
+                    .episode_title
+                    .as_deref()
+                    .map(sanitize_filename)
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| base_name.clone());
+                let extra_file = format!("{extra_name}{}.{ext}", extra.filename_suffix());
+                return match organization {
+                    FolderOrganization::Flat => extra_file,
+                    FolderOrganization::ShowAndSeason | FolderOrganization::SeasonOnly => {
+                        match convention {
+                            NamingConvention::Plain => format!("{base_name}/{extra_file}"),
+                            NamingConvention::Plex | NamingConvention::Jellyfin => {
+                                format!("{tagged_base}/{extra_file}")
+                            }
+                        }
+                    }
+                };
+            }
+            match organization {
+                FolderOrganization::Flat => match convention {
+                    NamingConvention::Plain => format!("{base_name}.{ext}"),
                     NamingConvention::Plex | NamingConvention::Jellyfin => {
-                        format!("{tagged_base}/{tagged_base}.{ext}")
+                        format!("{tagged_base}.{ext}")
+                    }
+                },
+                FolderOrganization::ShowAndSeason | FolderOrganization::SeasonOnly => {
+                    match convention {
+                        NamingConvention::Plain => format!("{base_name}/{base_name}.{ext}"),
+                        NamingConvention::Plex | NamingConvention::Jellyfin => {
+                            format!("{tagged_base}/{tagged_base}.{ext}")
+                        }
                     }
                 }
             }
-        },
+        }
         MediaKind::TvEpisode => {
+            if let Some(extra) = meta.extra_type {
+                let extra_name = meta
+                    .episode_title
+                    .as_deref()
+                    .map(sanitize_filename)
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| base_name.clone());
+                let extra_file = format!("{extra_name}{}.{ext}", extra.filename_suffix());
+                return match organization {
+                    FolderOrganization::Flat => extra_file,
+                    FolderOrganization::SeasonOnly => format!("Specials/{extra_file}"),
+                    FolderOrganization::ShowAndSeason => {
+                        format!("{tagged_base}/Specials/{extra_file}")
+                    }
+                };
+            }
+
             let season = meta.season.unwrap_or(1);
             let episode = meta.episode.unwrap_or(1);
-            let ep_code = format!("S{season:02}E{episode:02}");
+            let ep_code = match meta.episode_end.filter(|&end| end > episode) {
+                Some(end) => format!("S{season:02}E{episode:02}-E{end:02}"),
+                None => format!("S{season:02}E{episode:02}"),
+            };
             let ep_title = meta
                 .episode_title
                 .as_deref()
@@ -435,11 +511,17 @@ pub fn format_output_relative_path_with_org(
                 None => format!("{base_name} - {ep_code}.{ext}"),
             };
 
+            let season_dir = if season == 0 {
+                "Specials".to_string()
+            } else {
+                format!("Season {season:02}")
+            };
+
             match organization {
                 FolderOrganization::Flat => filename,
-                FolderOrganization::SeasonOnly => format!("Season {season:02}/{filename}"),
+                FolderOrganization::SeasonOnly => format!("{season_dir}/{filename}"),
                 FolderOrganization::ShowAndSeason => {
-                    format!("{tagged_base}/Season {season:02}/{filename}")
+                    format!("{tagged_base}/{season_dir}/{filename}")
                 }
             }
         }
@@ -708,7 +790,9 @@ fn parse_omdb_response(
             year,
             season: None,
             episode: None,
+            episode_end: None,
             episode_title: None,
+            extra_type: None,
             ids: ExternalIds {
                 imdb_id,
                 tvdb_id: None,
@@ -864,7 +948,9 @@ fn parse_tvdb_response(json: &Value, default_kind: MediaKind) -> Vec<MediaMetada
                 year,
                 season: None,
                 episode: None,
+                episode_end: None,
                 episode_title: None,
+                extra_type: None,
                 ids: ExternalIds {
                     imdb_id,
                     tvdb_id,
@@ -975,7 +1061,9 @@ fn parse_tmdb_response(json: &Value, kind: MediaKind) -> Vec<MediaMetadata> {
                 year,
                 season: None,
                 episode: None,
+                episode_end: None,
                 episode_title: None,
+                extra_type: None,
                 ids: ExternalIds {
                     imdb_id: None,
                     tvdb_id: None,
@@ -1350,7 +1438,9 @@ pub fn parse_imdb_suggestion_movies(json: &Value, year_hint: Option<u16>) -> Vec
                 year,
                 season: None,
                 episode: None,
+                episode_end: None,
                 episode_title: None,
+                extra_type: None,
                 ids: ExternalIds {
                     imdb_id: Some(imdb_id),
                     tvdb_id: None,
@@ -1427,7 +1517,9 @@ async fn search_itunes_movies(
                 year,
                 season: None,
                 episode: None,
+                episode_end: None,
                 episode_title: None,
+                extra_type: None,
                 ids: ExternalIds::default(),
                 overview,
                 poster_url,
@@ -1824,7 +1916,9 @@ fn parse_tvmaze_response(json: &Value) -> Vec<MediaMetadata> {
                 year,
                 season: None,
                 episode: None,
+                episode_end: None,
                 episode_title: None,
+                extra_type: None,
                 ids: ExternalIds {
                     imdb_id,
                     tvdb_id,
@@ -1876,7 +1970,9 @@ mod tests {
             year: Some(1999),
             season: None,
             episode: None,
+            episode_end: None,
             episode_title: None,
+            extra_type: None,
             ids: ExternalIds {
                 imdb_id: Some("tt0133093".to_string()),
                 tvdb_id: None,
@@ -1896,7 +1992,9 @@ mod tests {
             year: Some(2008),
             season: Some(1),
             episode: Some(1),
+            episode_end: None,
             episode_title: Some("Pilot".to_string()),
+            extra_type: None,
             ids: ExternalIds {
                 imdb_id: Some("tt0903747".to_string()),
                 tvdb_id: Some("81189".to_string()),

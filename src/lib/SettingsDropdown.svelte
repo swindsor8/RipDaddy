@@ -24,6 +24,7 @@
     QualityProfile,
     ResolutionTier,
     SettingsCategory,
+    TrackSelectionOptions,
   } from "./types";
 
   interface Props {
@@ -149,12 +150,23 @@
     }
   });
 
-  // Live HandBrakeCLI flag preview from Rust's handbrake::build_quality_flags
+  // Live HandBrakeCLI flag preview from Rust's handbrake::build_quality_flags_with_tracks
   $effect(() => {
     const profile = editingProfile;
+    const audioLanguages = [...settings.preferredAudioLanguages];
+    const subtitleLanguages = [...settings.preferredSubtitleLanguages];
     if (!open || activeCategory !== "encoding" || !profile) return;
     let cancelled = false;
-    void invoke<string[]>("preview_quality_cli_args", { profile })
+    const trackSelection: TrackSelectionOptions = {
+      selectedAudioTracks: null,
+      selectedSubtitleTracks: null,
+      audioLanguages,
+      subtitleLanguages,
+    };
+    void invoke<string[]>("preview_quality_cli_args", {
+      profile,
+      trackSelection,
+    })
       .then((flags) => {
         if (!cancelled) {
           cliFlagsPreview = `HandBrakeCLI --json -i <in> -o <out> ${flags.join(" ")}`;
@@ -169,6 +181,41 @@
       cancelled = true;
     };
   });
+
+  const COMMON_LANGUAGES: { code: string; label: string }[] = [
+    { code: "eng", label: "English" },
+    { code: "jpn", label: "Japanese" },
+    { code: "spa", label: "Spanish" },
+    { code: "fre", label: "French" },
+    { code: "ger", label: "German" },
+    { code: "ita", label: "Italian" },
+    { code: "kor", label: "Korean" },
+    { code: "zho", label: "Chinese" },
+  ];
+
+  function togglePreferredLanguage(
+    key: "preferredAudioLanguages" | "preferredSubtitleLanguages",
+    code: string,
+  ): void {
+    const current = settings[key];
+    const next = current.includes(code)
+      ? current.filter((c) => c !== code)
+      : [...current, code];
+    onUpdateSetting(key, next);
+  }
+
+  function parseLanguageInput(raw: string): string[] {
+    const seen = new Set<string>();
+    const list: string[] = [];
+    for (const part of raw.split(/[\s,;]+/)) {
+      const clean = part.replace(/[^a-zA-Z]/g, "").toLowerCase();
+      if (clean.length >= 2 && clean.length <= 3 && !seen.has(clean)) {
+        seen.add(clean);
+        list.push(clean);
+      }
+    }
+    return list;
+  }
 
   function patchEditingProfile(partial: Partial<QualityProfile>): void {
     if (!editingProfile) return;
@@ -1156,6 +1203,141 @@
                         />
                         <span>MP4 Web Optimize (Fast Start)</span>
                       </label>
+                    </div>
+                  </div>
+
+                  <!-- Preferred Audio & Subtitle Language Filters -->
+                  <div class="space-y-2.5 border-t border-[#E6E0D6] pt-3">
+                    <div class="flex items-center justify-between gap-2">
+                      <div>
+                        <div class="text-[11px] font-bold text-[#1A1513]">
+                          Default Audio &amp; Subtitle Languages (ISO-639-2)
+                        </div>
+                        <div class="text-[10px] text-[#70645D]">
+                          Passed to HandBrakeCLI via <span class="font-mono">--audio-lang-list</span> &amp; <span class="font-mono">--subtitle-lang-list</span> when tracks aren't manually toggled.
+                        </div>
+                      </div>
+                    </div>
+
+                    <div class="grid grid-cols-2 gap-3">
+                      <!-- Audio Languages -->
+                      <div class="space-y-1.5">
+                        <div class="flex items-center justify-between">
+                          <label
+                            for="setting-audio-langs"
+                            class="text-[11px] font-semibold text-[#544943]"
+                          >
+                            Audio Languages
+                          </label>
+                          {#if settings.preferredAudioLanguages.length > 0}
+                            <button
+                              type="button"
+                              onclick={() =>
+                                onUpdateSetting("preferredAudioLanguages", [])}
+                              class="text-[10px] font-semibold text-[#7D716A] hover:text-[#1A1513]"
+                            >
+                              All
+                            </button>
+                          {/if}
+                        </div>
+                        <div class="flex flex-wrap gap-1">
+                          {#each COMMON_LANGUAGES as lang (lang.code)}
+                            {@const active =
+                              settings.preferredAudioLanguages.includes(
+                                lang.code,
+                              )}
+                            <button
+                              type="button"
+                              onclick={() =>
+                                togglePreferredLanguage(
+                                  "preferredAudioLanguages",
+                                  lang.code,
+                                )}
+                              title={lang.label}
+                              class={`rounded-full border px-2 py-0.5 font-mono text-[10px] font-semibold transition ${
+                                active
+                                  ? "border-[#1FA868] bg-[#4CDE99] text-[#1A1513]"
+                                  : "border-[#DAD3C7] bg-white text-[#61554F] hover:border-[#1A1513] hover:text-[#1A1513]"
+                              }`}
+                            >
+                              {lang.code}
+                            </button>
+                          {/each}
+                        </div>
+                        <input
+                          id="setting-audio-langs"
+                          type="text"
+                          value={settings.preferredAudioLanguages.join(", ")}
+                          placeholder="All languages (or e.g. eng, jpn)"
+                          onchange={(e) =>
+                            onUpdateSetting(
+                              "preferredAudioLanguages",
+                              parseLanguageInput(e.currentTarget.value),
+                            )}
+                          class="w-full rounded-md border border-[#DAD3C7] bg-white px-2 py-1 font-mono text-[11px] text-[#1A1513] placeholder:text-[#A89C95] outline-none focus:border-[#1A1513]"
+                        />
+                      </div>
+
+                      <!-- Subtitle Languages -->
+                      <div class="space-y-1.5">
+                        <div class="flex items-center justify-between">
+                          <label
+                            for="setting-sub-langs"
+                            class="text-[11px] font-semibold text-[#544943]"
+                          >
+                            Subtitle Languages
+                          </label>
+                          {#if settings.preferredSubtitleLanguages.length > 0}
+                            <button
+                              type="button"
+                              onclick={() =>
+                                onUpdateSetting(
+                                  "preferredSubtitleLanguages",
+                                  [],
+                                )}
+                              class="text-[10px] font-semibold text-[#7D716A] hover:text-[#1A1513]"
+                            >
+                              All
+                            </button>
+                          {/if}
+                        </div>
+                        <div class="flex flex-wrap gap-1">
+                          {#each COMMON_LANGUAGES as lang (lang.code)}
+                            {@const active =
+                              settings.preferredSubtitleLanguages.includes(
+                                lang.code,
+                              )}
+                            <button
+                              type="button"
+                              onclick={() =>
+                                togglePreferredLanguage(
+                                  "preferredSubtitleLanguages",
+                                  lang.code,
+                                )}
+                              title={lang.label}
+                              class={`rounded-full border px-2 py-0.5 font-mono text-[10px] font-semibold transition ${
+                                active
+                                  ? "border-[#D68D1C] bg-[#F8B142] text-[#1A1513]"
+                                  : "border-[#DAD3C7] bg-white text-[#61554F] hover:border-[#1A1513] hover:text-[#1A1513]"
+                              }`}
+                            >
+                              {lang.code}
+                            </button>
+                          {/each}
+                        </div>
+                        <input
+                          id="setting-sub-langs"
+                          type="text"
+                          value={settings.preferredSubtitleLanguages.join(", ")}
+                          placeholder="All languages (or e.g. eng)"
+                          onchange={(e) =>
+                            onUpdateSetting(
+                              "preferredSubtitleLanguages",
+                              parseLanguageInput(e.currentTarget.value),
+                            )}
+                          class="w-full rounded-md border border-[#DAD3C7] bg-white px-2 py-1 font-mono text-[11px] text-[#1A1513] placeholder:text-[#A89C95] outline-none focus:border-[#1A1513]"
+                        />
+                      </div>
                     </div>
                   </div>
 

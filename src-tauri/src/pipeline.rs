@@ -13,6 +13,7 @@
 use crate::detect::{self, ResolvedCommand};
 use crate::handbrake::{
     self, EncodeOptions, HandBrakeState, ProgressStreamParser, QualityProfile,
+    TrackSelectionOptions,
 };
 use crate::makemkv::{self, RobotMessage};
 use crate::metadata::{self, FolderOrganization, MediaMetadata, NamingConvention};
@@ -187,6 +188,8 @@ pub struct EnqueueJobRequest {
     pub naming_convention: NamingConvention,
     pub folder_organization: Option<FolderOrganization>,
     pub media_metadata: Option<MediaMetadata>,
+    #[serde(default)]
+    pub track_selection: TrackSelectionOptions,
 }
 
 /// Internal execution metadata retained alongside each `QueueJob`.
@@ -199,6 +202,7 @@ struct JobExecutionSpec {
     custom_preset_name: Option<String>,
     drive_device_path: Option<String>,
     auto_eject_disc: bool,
+    track_selection: TrackSelectionOptions,
 }
 
 /// Structured events streamed from Rust to the Svelte frontend via Tauri events / `Channel`.
@@ -745,6 +749,7 @@ impl PipelineController {
                 custom_preset_name: req.custom_preset_name,
                 drive_device_path: req.drive_device_path,
                 auto_eject_disc: req.auto_eject_disc,
+                track_selection: req.track_selection,
             };
 
             self.specs.write().await.insert(job_id.clone(), spec);
@@ -766,6 +771,83 @@ impl PipelineController {
         }
 
         Ok(created_jobs)
+    }
+
+    /// Retries a `Failed` or `Cancelled` job by resetting its stage and re-dispatching it onto
+    /// the appropriate Tokio worker with refreshed external CLI paths.
+    pub async fn retry_job(
+        &self,
+        job_id: &str,
+        makemkv_cmd: Option<ResolvedCommand>,
+        handbrake_cmd: Option<ResolvedCommand>,
+    ) -> Result<QueueJob, String> {
+        let job = {
+            let mut guard = self.jobs.write().await;
+            let Some(job) = guard.iter_mut().find(|j| j.id == job_id) else {
+                return Err(format!("Queue job not found: {job_id}"));
+            };
+            if !matches!(job.stage, JobStage::Failed | JobStage::Cancelled) {
+                return Err("Only failed or cancelled jobs can be retried.".to_string());
+            }
+
+            let needs_rip = matches!(job.mode, PipelineMode::RipOnly | PipelineMode::RipAndEncode);
+            let needs_encode =
+                matches!(job.mode, PipelineMode::EncodeOnly | PipelineMode::RipAndEncode);
+            if needs_rip && makemkv_cmd.is_none() {
+                return Err(
+                    "makemkvcon is not available. Check Settings → External CLIs.".to_string(),
+                );
+            }
+            if needs_encode && handbrake_cmd.is_none() {
+                return Err(
+                    "HandBrakeCLI is not available. Check Settings → External CLIs.".to_string(),
+                );
+            }
+
+            let initial = job.mode.initial_stage();
+            job.stage = initial;
+            job.error = None;
+            job.temp_mkv_path = None;
+            job.progress = JobProgress {
+                stage: initial,
+                percent: 0.0,
+                eta_seconds: None,
+                fps: None,
+                message: Some("Retrying...".to_string()),
+            };
+            job.clone()
+        };
+        {
+            let mut specs = self.specs.write().await;
+            if let Some(spec) = specs.get_mut(job_id) {
+                if makemkv_cmd.is_some() {
+                    spec.makemkv_cmd = makemkv_cmd;
+                }
+                if handbrake_cmd.is_some() {
+                    spec.handbrake_cmd = handbrake_cmd;
+                }
+            }
+        }
+
+        self.emit_event(&PipelineEvent::LogLine {
+            job_id: job.id.clone(),
+            stage: job.stage,
+            stream: "system".to_string(),
+            line: "--- Retrying job ---".to_string(),
+        });
+        self.emit_event(&PipelineEvent::JobUpdated { job: job.clone() });
+
+        let send_res = match job.mode {
+            PipelineMode::RipOnly | PipelineMode::RipAndEncode => {
+                self.rip_tx.send(job.id.clone()).await
+            }
+            PipelineMode::EncodeOnly => self.encode_tx.send(job.id.clone()).await,
+        };
+        if send_res.is_err() {
+            return Err("Pipeline worker channel is closed.".to_string());
+        }
+
+        Ok(job)
     }
 
     fn emit_event(&self, event: &PipelineEvent) {
@@ -939,6 +1021,13 @@ async fn run_rip_worker(
 
         let mounted_cmd = base_cmd.with_flatpak_paths(&[staging_dir.as_path()]);
         let args = makemkv::build_rip_title_args(drive_index, title_id, &staging_dir);
+        emit_job_log(
+            &app,
+            &job_id,
+            JobStage::Ripping,
+            "system",
+            format!("$ {} {}", mounted_cmd.program, args.join(" ")),
+        );
 
         let (prog_tx, mut prog_rx) = mpsc::channel::<JobProgress>(32);
         let jobs_prog = Arc::clone(&jobs);
@@ -952,6 +1041,8 @@ async fn run_rip_worker(
 
         let mut last_emit = Instant::now() - PROGRESS_THROTTLE;
         let mut last_error_msg: Option<String> = None;
+        let app_log = app.clone();
+        let id_log = job_id.clone();
         let run_result = spawn_and_stream_resolved(
             &mounted_cmd,
             &args,
@@ -978,6 +1069,7 @@ async fn run_rip_worker(
                             let fields = makemkv::split_robot_fields(&payload);
                             if let Some(text) = fields.get(3).filter(|s| !s.trim().is_empty()) {
                                 last_error_msg = Some(text.clone());
+                                emit_job_log(&app_log, &id_log, JobStage::Ripping, "stdout", text.clone());
                             }
                         }
                         _ => {}
@@ -986,6 +1078,13 @@ async fn run_rip_worker(
                     let trimmed = line.trim();
                     if !trimmed.is_empty() {
                         last_error_msg = Some(trimmed.to_string());
+                        emit_job_log(
+                            &app_log,
+                            &id_log,
+                            JobStage::Ripping,
+                            "stderr",
+                            trimmed.to_string(),
+                        );
                     }
                 }
             },
@@ -1146,7 +1245,12 @@ async fn run_encode_worker(
                     .find(|p| p.id == "p1080:local")
                     .expect("p1080:local default")
             });
-            handbrake::build_quality_profile_encode_args(&input_path, &output_path, &profile)
+            handbrake::build_quality_profile_encode_args_with_tracks(
+                &input_path,
+                &output_path,
+                &profile,
+                &spec.track_selection,
+            )
         };
 
         let mut mount_dirs: Vec<&Path> = Vec::new();
@@ -1162,6 +1266,13 @@ async fn run_encode_worker(
             }
         }
         let mounted_cmd = base_cmd.with_flatpak_paths(&mount_dirs);
+        emit_job_log(
+            &app,
+            &job_id,
+            JobStage::Encoding,
+            "system",
+            format!("$ {} {}", mounted_cmd.program, args.join(" ")),
+        );
 
         let (prog_tx, mut prog_rx) = mpsc::channel::<JobProgress>(32);
         let jobs_prog = Arc::clone(&jobs);
@@ -1176,6 +1287,8 @@ async fn run_encode_worker(
         let mut parser = ProgressStreamParser::new();
         let mut last_emit = Instant::now() - PROGRESS_THROTTLE;
         let mut last_stderr: Option<String> = None;
+        let app_log = app.clone();
+        let id_log = job_id.clone();
         let run_result = spawn_and_stream_resolved(
             &mounted_cmd,
             &args,
@@ -1208,6 +1321,13 @@ async fn run_encode_worker(
                     let trimmed = line.trim();
                     if !trimmed.is_empty() {
                         last_stderr = Some(trimmed.to_string());
+                        emit_job_log(
+                            &app_log,
+                            &id_log,
+                            JobStage::Encoding,
+                            "stderr",
+                            trimmed.to_string(),
+                        );
                     }
                 }
             },
@@ -1317,6 +1437,24 @@ async fn transition_and_emit(
     } else {
         false
     }
+}
+
+fn emit_job_log(
+    app: &AppHandle,
+    job_id: &str,
+    stage: JobStage,
+    stream: &str,
+    line: String,
+) {
+    let _ = app.emit(
+        PIPELINE_EVENT_NAME,
+        &PipelineEvent::LogLine {
+            job_id: job_id.to_string(),
+            stage,
+            stream: stream.to_string(),
+            line,
+        },
+    );
 }
 
 async fn update_job_progress(

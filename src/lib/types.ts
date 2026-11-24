@@ -190,6 +190,13 @@ export interface EncodeOptions {
   extraArgs: string[];
 }
 
+export interface TrackSelectionOptions {
+  selectedAudioTracks?: number[] | null;
+  selectedSubtitleTracks?: number[] | null;
+  audioLanguages: string[];
+  subtitleLanguages: string[];
+}
+
 export interface EncodeProgress {
   state: HandBrakeState;
   percent: number;
@@ -251,6 +258,16 @@ export type FolderOrganization = "showAndSeason" | "seasonOnly" | "flat";
 
 export type FolderOrganizationPref = "ask" | FolderOrganization;
 
+export type MediaExtraType =
+  | "behindTheScenes"
+  | "deleted"
+  | "featurette"
+  | "interview"
+  | "scene"
+  | "short"
+  | "trailer"
+  | "other";
+
 export interface EpisodePreviewSample {
   kind: MediaKind;
   title: string;
@@ -258,7 +275,9 @@ export interface EpisodePreviewSample {
   providerTag: string | null;
   season: number | null;
   episode: number | null;
+  episodeEnd?: number | null;
   episodeTitle: string | null;
+  extraType?: MediaExtraType | null;
 }
 
 export type FolderContentKind = "tvSeries" | "movies" | "mixed";
@@ -283,7 +302,10 @@ export interface IdentifiedVideoFile {
   mediaKind: MediaKind;
   season: number | null;
   episode: number | null;
+  episodeEnd: number | null;
   episodeTitle: string | null;
+  extraType: MediaExtraType | null;
+  seriesMetadata: MediaMetadata | null;
   movieMetadata: MediaMetadata | null;
   movieCandidates: MediaMetadata[];
   matchedFromCatalog: boolean;
@@ -296,8 +318,10 @@ export interface FolderIdentifyResult {
   inferredShowQuery: string;
   providerUsed: MetadataProvider | null;
   matchedShow: MediaMetadata | null;
+  detectedShows: MediaMetadata[];
   showCandidates: MediaMetadata[];
   episodesCatalog: EpisodeInfo[];
+  seriesEpisodesByShow: Record<string, EpisodeInfo[]>;
   files: IdentifiedVideoFile[];
   totalSizeBytes: number;
   statusMessage: string;
@@ -309,7 +333,9 @@ export interface MediaMetadata {
   year: number | null;
   season: number | null;
   episode: number | null;
+  episodeEnd?: number | null;
   episodeTitle: string | null;
+  extraType?: MediaExtraType | null;
   ids: ExternalIds;
   overview: string | null;
   posterUrl: string | null;
@@ -482,6 +508,7 @@ export interface EnqueueJobRequest {
   namingConvention: NamingConvention;
   folderOrganization: FolderOrganization | null;
   mediaMetadata: MediaMetadata | null;
+  trackSelection?: TrackSelectionOptions;
 }
 
 export type PipelineEvent =
@@ -529,6 +556,8 @@ export interface AppSettings {
   defaultContainer: string;
   customPresetFile: string | null;
   minTitleLengthSeconds: number;
+  preferredAudioLanguages: string[];
+  preferredSubtitleLanguages: string[];
   // Metadata & Naming
   namingConvention: NamingConvention;
   tvFolderOrganization: FolderOrganizationPref;

@@ -9,7 +9,7 @@ pub mod preview;
 
 use detect::{AutoSetupResult, BinariesCheckResult, BinaryKind, BinaryPathsConfig};
 use folder_id::{FolderIdentifyResult, IdentifiedVideoFile};
-use handbrake::{HandBrakePreset, QualityProfile};
+use handbrake::{HandBrakePreset, QualityProfile, TrackSelectionOptions};
 use makemkv::{DiscScanResult, OpticalDrive};
 use metadata::{
     DiscLabelGuess, EpisodeInfo, ExternalIds, FolderOrganization, MediaKind, MediaMetadata,
@@ -173,10 +173,13 @@ fn get_recommended_quality_profiles() -> Vec<QualityProfile> {
     handbrake::recommended_quality_profiles()
 }
 
-/// Generates the exact `HandBrakeCLI` flags for a customizable `QualityProfile`.
+/// Generates the exact `HandBrakeCLI` flags for a customizable `QualityProfile` + track options.
 #[tauri::command]
-fn preview_quality_cli_args(profile: QualityProfile) -> Vec<String> {
-    handbrake::build_quality_flags(&profile)
+fn preview_quality_cli_args(
+    profile: QualityProfile,
+    track_selection: Option<TrackSelectionOptions>,
+) -> Vec<String> {
+    handbrake::build_quality_flags_with_tracks(&profile, &track_selection.unwrap_or_default())
 }
 
 /// Cleans an optical disc volume label into a title, year, and season guess.
@@ -244,6 +247,15 @@ async fn identify_video_files(
     folder_id::identify_video_file_list(&file_paths, config.unwrap_or_default()).await
 }
 
+/// Identifies any mix of dropped folders and/or video files from native drag-and-drop.
+#[tauri::command]
+async fn identify_dropped_paths(
+    paths: Vec<String>,
+    config: Option<MetadataProviderConfig>,
+) -> Result<FolderIdentifyResult, String> {
+    folder_id::identify_dropped_paths(&paths, config.unwrap_or_default()).await
+}
+
 /// Fetches the official episode catalog for a manually selected TV series so all queued rows
 /// immediately adopt canonical episode titles and uniform naming.
 #[tauri::command]
@@ -269,12 +281,14 @@ async fn fetch_series_episodes(
 async fn rematch_tv_files(
     file_paths: Vec<String>,
     show_title: String,
+    series_metadata: Option<MediaMetadata>,
     episodes_catalog: Vec<EpisodeInfo>,
     default_season: Option<u32>,
 ) -> Vec<IdentifiedVideoFile> {
     folder_id::rematch_files_to_series(
         &file_paths,
         &show_title,
+        series_metadata,
         &episodes_catalog,
         default_season,
     )
@@ -347,6 +361,99 @@ async fn cancel_job(
     Ok(state.cancel_job(&job_id).await)
 }
 
+/// Retries a failed or cancelled job on the live pipeline workers.
+#[tauri::command]
+async fn retry_job(
+    job_id: String,
+    config: Option<BinaryPathsConfig>,
+    state: tauri::State<'_, PipelineController>,
+) -> Result<QueueJob, String> {
+    let detected = detect::check_binaries(config.unwrap_or_default()).await;
+    let makemkv_cmd = detected.makemkv.found.then_some(detected.makemkv.command).flatten();
+    let handbrake_cmd = detected
+        .handbrake
+        .found
+        .then_some(detected.handbrake.command)
+        .flatten();
+    state.retry_job(&job_id, makemkv_cmd, handbrake_cmd).await
+}
+
+/// Reveals a file or opens a directory in the host OS's native file manager
+/// (Finder on macOS, Explorer on Windows, Nautilus/Dolphin/xdg-open on Linux).
+#[tauri::command]
+fn reveal_in_file_manager(path: String) -> Result<(), String> {
+    let target = Path::new(path.trim());
+    if path.trim().is_empty() {
+        return Err("No path provided to open.".to_string());
+    }
+    let dir_fallback = if target.is_dir() {
+        target.to_path_buf()
+    } else {
+        target
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| target.to_path_buf())
+    };
+    if !target.exists() && !dir_fallback.exists() {
+        return Err(format!("Path does not exist: {}", target.display()));
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let mut cmd = std::process::Command::new("open");
+        if target.is_file() {
+            cmd.arg("-R").arg(target);
+        } else {
+            cmd.arg(&dir_fallback);
+        }
+        cmd.spawn()
+            .map_err(|err| format!("Failed opening Finder: {err}"))?;
+        return Ok(());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let mut cmd = std::process::Command::new("explorer");
+        if target.is_file() {
+            cmd.arg(format!("/select,{}", target.display()));
+        } else {
+            cmd.arg(&dir_fallback);
+        }
+        cmd.spawn()
+            .map_err(|err| format!("Failed opening Explorer: {err}"))?;
+        return Ok(());
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        if target.is_file() {
+            if let Ok(canon) = std::fs::canonicalize(target) {
+                let uri = format!("file://{}", canon.to_string_lossy());
+                if std::process::Command::new("dbus-send")
+                    .args([
+                        "--session",
+                        "--dest=org.freedesktop.FileManager1",
+                        "--type=method_call",
+                        "/org/freedesktop/FileManager1",
+                        "org.freedesktop.FileManager1.ShowItems",
+                        &format!("array:string:{uri}"),
+                        "string:",
+                    ])
+                    .status()
+                    .is_ok_and(|s| s.success())
+                {
+                    return Ok(());
+                }
+            }
+        }
+        std::process::Command::new("xdg-open")
+            .arg(&dir_fallback)
+            .spawn()
+            .map_err(|err| format!("Failed opening file manager: {err}"))?;
+        Ok(())
+    }
+}
+
 /// Removes completed, cancelled, and failed jobs from the queue list.
 #[tauri::command]
 async fn clear_finished_jobs(
@@ -398,6 +505,7 @@ pub fn run() {
             fetch_tmdb_external_ids,
             identify_video_folder,
             identify_video_files,
+            identify_dropped_paths,
             fetch_series_episodes,
             rematch_tv_files,
             plan_organize_folder,
@@ -406,7 +514,9 @@ pub fn run() {
             enqueue_jobs,
             get_queue,
             cancel_job,
+            retry_job,
             clear_finished_jobs,
+            reveal_in_file_manager,
             subscribe_pipeline_events
         ])
         .build(tauri::generate_context!())

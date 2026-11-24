@@ -3,6 +3,7 @@
     EpisodePreviewSample,
     FolderContentKind,
     FolderOrganization,
+    MediaExtraType,
     NamingConvention,
   } from "./types";
 
@@ -60,6 +61,27 @@
       .trim();
   }
 
+  function extraTypeSuffix(extra: MediaExtraType): string {
+    switch (extra) {
+      case "behindTheScenes":
+        return "-behindthescenes";
+      case "deleted":
+        return "-deleted";
+      case "featurette":
+        return "-featurette";
+      case "interview":
+        return "-interview";
+      case "scene":
+        return "-scene";
+      case "short":
+        return "-short";
+      case "trailer":
+        return "-trailer";
+      case "other":
+        return "-other";
+    }
+  }
+
   function formatSamplePath(
     sample: EpisodePreviewSample,
     org: FolderOrganization,
@@ -72,23 +94,55 @@
         : baseName;
 
     if (sample.kind === "movie") {
+      if (sample.extraType) {
+        const extraStem = sample.episodeTitle
+          ? sanitizeName(sample.episodeTitle)
+          : clean;
+        const extraFile = `${extraStem}${extraTypeSuffix(sample.extraType)}.${outputExtension}`;
+        if (org === "flat") {
+          return extraFile;
+        }
+        return `${taggedBase}/${extraFile}`;
+      }
       if (org === "flat") {
         return `${taggedBase}.${outputExtension}`;
       }
       return `${taggedBase}/${taggedBase}.${outputExtension}`;
     }
 
-    const s = String(sample.season ?? 1).padStart(2, "0");
-    const e = String(sample.episode ?? 1).padStart(2, "0");
+    if (sample.extraType) {
+      const extraStem = sample.episodeTitle
+        ? sanitizeName(sample.episodeTitle)
+        : clean;
+      const extraFile = `${extraStem}${extraTypeSuffix(sample.extraType)}.${outputExtension}`;
+      switch (org) {
+        case "showAndSeason":
+          return `${taggedBase}/Specials/${extraFile}`;
+        case "seasonOnly":
+          return `Specials/${extraFile}`;
+        case "flat":
+          return extraFile;
+      }
+    }
+
+    const seasonNum = sample.season ?? 1;
+    const epNum = sample.episode ?? 1;
+    const s = String(seasonNum).padStart(2, "0");
+    const e = String(epNum).padStart(2, "0");
+    const epRange =
+      sample.episodeEnd && sample.episodeEnd > epNum
+        ? `S${s}E${e}-E${String(sample.episodeEnd).padStart(2, "0")}`
+        : `S${s}E${e}`;
     const epPart = sample.episodeTitle
       ? ` - ${sanitizeName(sample.episodeTitle)}`
       : "";
-    const filename = `${baseName} - S${s}E${e}${epPart}.${outputExtension}`;
+    const filename = `${baseName} - ${epRange}${epPart}.${outputExtension}`;
+    const seasonDir = seasonNum === 0 ? "Specials" : `Season ${s}`;
     switch (org) {
       case "showAndSeason":
-        return `${taggedBase}/Season ${s}/${filename}`;
+        return `${taggedBase}/${seasonDir}/${filename}`;
       case "seasonOnly":
-        return `Season ${s}/${filename}`;
+        return `${seasonDir}/${filename}`;
       case "flat":
         return filename;
     }
@@ -153,14 +207,16 @@
               class="rounded-full border border-[#1C8EC0] bg-[#E6F6FD] px-2.5 py-0.5 font-mono text-[10px] font-bold text-[#0E5678]"
             >
               {detectedSeasons.length} Seasons ({detectedSeasons
-                .map((s) => `S${String(s).padStart(2, "0")}`)
+                .map((s) => (s === 0 ? "Specials" : `S${String(s).padStart(2, "0")}`))
                 .join(", ")})
             </span>
           {:else if detectedSeasons.length === 1}
             <span
               class="rounded-full border border-[#E6E0D6] bg-white px-2 py-0.5 font-mono text-[10px] font-semibold text-[#61554F]"
             >
-              Season {String(detectedSeasons[0]).padStart(2, "0")}
+              {detectedSeasons[0] === 0
+                ? "Specials"
+                : `Season ${String(detectedSeasons[0]).padStart(2, "0")}`}
             </span>
           {/if}
         </div>
