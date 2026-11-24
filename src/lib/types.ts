@@ -121,6 +121,12 @@ export interface DiscTitle {
   streams: StreamTrack[];
 }
 
+export interface DiscScanResult {
+  driveIndex: number;
+  discName: string;
+  titles: DiscTitle[];
+}
+
 // ---------------------------------------------------------------------------
 // HandBrake Presets & Progress (src-tauri/src/handbrake.rs)
 // ---------------------------------------------------------------------------
@@ -195,6 +201,43 @@ export interface EncodeProgress {
 }
 
 // ---------------------------------------------------------------------------
+// Auto-Generated Trickplay Preview Frames & Media Info (src-tauri/src/preview.rs)
+// ---------------------------------------------------------------------------
+
+export interface VideoMediaInfo {
+  width: number | null;
+  height: number | null;
+  displayWidth: number | null;
+  displayHeight: number | null;
+  displayAspectRatio: string | null;
+  sampleAspectRatio: string | null;
+  videoCodec: string | null;
+  pixelFormat: string | null;
+  fps: number | null;
+  durationSeconds: number | null;
+  bitrateKbps: number | null;
+  fileSizeBytes: number | null;
+  audioSummary: string | null;
+  subtitleCount: number;
+}
+
+export interface PreviewFrame {
+  index: number;
+  timestampSeconds: number;
+  timestampLabel: string;
+  path: string;
+}
+
+export interface TrickplayPreview {
+  sourcePath: string;
+  mediaInfo: VideoMediaInfo;
+  frames: PreviewFrame[];
+  extractor: string;
+  cached: boolean;
+  note: string | null;
+}
+
+// ---------------------------------------------------------------------------
 // IMDb / TVDB / TMDB Titling & Naming (src-tauri/src/metadata.rs)
 // ---------------------------------------------------------------------------
 
@@ -208,6 +251,34 @@ export interface ExternalIds {
   imdbId: string | null;
   tvdbId: string | null;
   tmdbId: string | null;
+}
+
+export interface EpisodeInfo {
+  season: number;
+  episode: number;
+  title: string;
+}
+
+export interface IdentifiedVideoFile {
+  path: string;
+  fileName: string;
+  fileSizeBytes: number | null;
+  season: number | null;
+  episode: number | null;
+  episodeTitle: string | null;
+  matchedFromCatalog: boolean;
+}
+
+export interface FolderIdentifyResult {
+  folderPath: string | null;
+  inferredShowQuery: string;
+  providerUsed: MetadataProvider | null;
+  matchedShow: MediaMetadata | null;
+  showCandidates: MediaMetadata[];
+  episodesCatalog: EpisodeInfo[];
+  files: IdentifiedVideoFile[];
+  totalSizeBytes: number;
+  statusMessage: string;
 }
 
 export interface MediaMetadata {
@@ -283,6 +354,25 @@ export interface QueueJob {
   stage: JobStage;
   progress: JobProgress;
   error: string | null;
+}
+
+export interface EnqueueJobRequest {
+  mode: PipelineMode;
+  discName: string;
+  driveIndex: number | null;
+  driveDevicePath: string | null;
+  titleId: number | null;
+  sourceFilePath: string | null;
+  titleName: string;
+  qualityProfile: QualityProfile | null;
+  customPresetFile: string | null;
+  customPresetName: string | null;
+  tempDir: string;
+  outputDir: string;
+  keepTempMkv: boolean;
+  autoEjectDisc: boolean;
+  namingConvention: NamingConvention;
+  mediaMetadata: MediaMetadata | null;
 }
 
 export type PipelineEvent =

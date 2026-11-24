@@ -25,7 +25,13 @@
       "csp": null,
       "assetProtocol": {
         "enable": true,
-        "scope": ["$HOME/**/*", "$TEMP/**/*", "$VIDEO/**/*"]
+        "scope": [
+          "$HOME/**/*",
+          "$CACHE/**/*",
+          "$LOCALDATA/**/*",
+          "$TEMP/**/*",
+          "$VIDEO/**/*"
+        ]
       }
     }
   },

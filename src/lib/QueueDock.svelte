@@ -6,9 +6,16 @@
     jobs: QueueJob[];
     onToggleExpanded: () => void;
     onCancelJob: (jobId: string) => void;
+    onClearFinished: () => void;
   }
 
-  let { expanded, jobs, onToggleExpanded, onCancelJob }: Props = $props();
+  let {
+    expanded,
+    jobs,
+    onToggleExpanded,
+    onCancelJob,
+    onClearFinished,
+  }: Props = $props();
 
   const activeJobs = $derived(
     jobs.filter(
@@ -19,12 +26,23 @@
     ),
   );
 
+  const hasFinishedJobs = $derived(
+    jobs.some(
+      (job) =>
+        job.stage === "completed" ||
+        job.stage === "cancelled" ||
+        job.stage === "failed",
+    ),
+  );
+
   const activeRipJob = $derived(
     jobs.find((job) => job.stage === "ripping") ?? null,
   );
 
   const activeEncodeJob = $derived(
-    jobs.find((job) => job.stage === "encoding") ?? null,
+    jobs.find(
+      (job) => job.stage === "encoding" || job.stage === "cleaningTemp",
+    ) ?? null,
   );
 
   function formatStageLabel(stage: JobStage): string {
@@ -48,6 +66,21 @@
     }
   }
 
+  function stageBadgeClass(stage: JobStage): string {
+    switch (stage) {
+      case "completed":
+        return "border-[#24B465] bg-[#E3F9EC] text-[#17462B]";
+      case "failed":
+        return "border-red-200 bg-red-50 text-red-700";
+      case "cancelled":
+        return "border-[#E5E3DD] bg-[#F8F7F4] text-[#787772]";
+      case "ripping":
+        return "border-[#F1B6E2] bg-[#FFE8F8] text-[#4A2040]";
+      default:
+        return "border-[#B5DAFA] bg-[#DCEEFF] text-[#155CA2]";
+    }
+  }
+
   function formatEta(seconds: number | null): string {
     if (seconds === null || seconds < 0) return "--";
     const mins = Math.floor(seconds / 60);
@@ -61,9 +94,7 @@
   class="shrink-0 border-t border-[#E5E3DD] bg-white"
 >
   <!-- Always-Visible 40px Live Status Ticker -->
-  <div
-    class="flex h-10 items-center justify-between gap-4 px-5 text-xs"
-  >
+  <div class="flex h-10 items-center justify-between gap-4 px-5 text-xs">
     <div class="flex min-w-0 items-center gap-4">
       <!-- Stage 1 Ticker -->
       <div class="flex min-w-0 items-center gap-2">
@@ -94,7 +125,8 @@
         <span class="font-semibold text-[#111111]">Stage 2 · Encode:</span>
         {#if activeEncodeJob}
           <span class="truncate font-mono text-[11px] text-[#52524E]">
-            {activeEncodeJob.titleName} · {activeEncodeJob.progress.percent.toFixed(1)}%
+            {activeEncodeJob.titleName} ·
+            {activeEncodeJob.progress.percent.toFixed(1)}%
             {#if activeEncodeJob.progress.fps !== null}
               · {activeEncodeJob.progress.fps.toFixed(1)} fps
             {/if}
@@ -106,12 +138,23 @@
       </div>
     </div>
 
-    <div class="flex shrink-0 items-center gap-2.5">
+    <div class="flex shrink-0 items-center gap-2">
+      {#if hasFinishedJobs}
+        <button
+          type="button"
+          onclick={onClearFinished}
+          class="rounded-md border border-[#E5E3DD] bg-white px-2 py-1 text-[10px] font-semibold text-[#5C5B57] transition hover:bg-[#F8F7F4] hover:text-[#111111]"
+        >
+          Clear Finished
+        </button>
+      {/if}
+
       <span
         class="rounded-full border border-[#E5E3DD] bg-[#F8F7F4] px-2 py-0.5 font-mono text-[10px] font-semibold text-[#52524E]"
       >
         {activeJobs.length} active · {jobs.length} total
       </span>
+
       <button
         type="button"
         onclick={onToggleExpanded}
@@ -125,9 +168,7 @@
 
   <!-- Expanded Full-Width Queue Table -->
   {#if expanded}
-    <div
-      class="h-52 overflow-y-auto border-t border-[#ECEAE4] bg-[#FAF9F6]"
-    >
+    <div class="h-56 overflow-y-auto border-t border-[#ECEAE4] bg-[#FAF9F6]">
       {#if jobs.length === 0}
         <div
           class="flex h-full flex-col items-center justify-center px-6 text-center"
@@ -153,58 +194,81 @@
 
         <div class="divide-y divide-[#ECEAE4] bg-white">
           {#each jobs as job (job.id)}
-            <div class="grid grid-cols-12 items-center gap-3 px-5 py-2.5 text-xs">
-              <div class="col-span-3 min-w-0">
-                <p class="truncate font-semibold text-[#111111]">
-                  {job.titleName}
-                </p>
-                <p class="truncate text-[10px] text-[#787772]">
-                  {job.mode} · {job.presetName ?? "Remux MKV"}
-                </p>
-              </div>
-
-              <div class="col-span-2">
-                <span
-                  class="inline-flex rounded-full border border-[#B5DAFA] bg-[#DCEEFF] px-2 py-0.5 font-mono text-[10px] font-semibold text-[#155CA2]"
-                >
-                  {formatStageLabel(job.stage)}
-                </span>
-              </div>
-
-              <div class="col-span-4 flex items-center gap-2.5">
-                <div
-                  class="h-1.5 flex-1 overflow-hidden rounded-full bg-[#E5E3DD]"
-                >
-                  <div
-                    class="h-full bg-[#1D8BF8] transition-all"
-                    style={`width: ${Math.min(100, Math.max(0, job.progress.percent))}%`}
-                  ></div>
-                </div>
-                <span class="w-11 text-right font-mono text-[11px] text-[#111111]">
-                  {job.progress.percent.toFixed(0)}%
-                </span>
-              </div>
-
-              <div class="col-span-2 font-mono text-[11px] text-[#52524E]">
-                {#if job.progress.fps !== null}
-                  {job.progress.fps.toFixed(1)} fps ·
-                {/if}
-                {formatEta(job.progress.etaSeconds)}
-              </div>
-
-              <div class="col-span-1 text-right">
-                {#if job.stage !== "completed" && job.stage !== "cancelled" && job.stage !== "failed"}
-                  <button
-                    type="button"
-                    onclick={() => onCancelJob(job.id)}
-                    class="text-[11px] font-semibold text-red-600 hover:text-red-700"
+            <div class="space-y-1 px-5 py-2.5 text-xs">
+              <div class="grid grid-cols-12 items-center gap-3">
+                <div class="col-span-3 min-w-0">
+                  <p class="truncate font-semibold text-[#111111]">
+                    {job.titleName}
+                  </p>
+                  <p
+                    class="truncate font-mono text-[10px] text-[#787772]"
+                    title={job.outputPath}
                   >
-                    Cancel
-                  </button>
-                {:else}
-                  <span class="text-[10px] text-[#9A9891]">Done</span>
-                {/if}
+                    {job.presetName ?? "Remux MKV"} · {job.outputPath}
+                  </p>
+                </div>
+
+                <div class="col-span-2">
+                  <span
+                    class={`inline-flex rounded-full border px-2 py-0.5 font-mono text-[10px] font-semibold ${stageBadgeClass(job.stage)}`}
+                  >
+                    {formatStageLabel(job.stage)}
+                  </span>
+                </div>
+
+                <div class="col-span-4 flex items-center gap-2.5">
+                  <div
+                    class="h-1.5 flex-1 overflow-hidden rounded-full bg-[#E5E3DD]"
+                  >
+                    <div
+                      class={`h-full transition-all ${
+                        job.stage === "completed"
+                          ? "bg-[#3AD27E]"
+                          : job.stage === "failed"
+                            ? "bg-red-500"
+                            : "bg-[#1D8BF8]"
+                      }`}
+                      style={`width: ${Math.min(100, Math.max(0, job.progress.percent))}%`}
+                    ></div>
+                  </div>
+                  <span class="w-11 text-right font-mono text-[11px] text-[#111111]">
+                    {job.progress.percent.toFixed(0)}%
+                  </span>
+                </div>
+
+                <div class="col-span-2 font-mono text-[11px] text-[#52524E]">
+                  {#if job.progress.message}
+                    {job.progress.message}
+                  {:else}
+                    {#if job.progress.fps !== null}
+                      {job.progress.fps.toFixed(1)} fps ·
+                    {/if}
+                    {formatEta(job.progress.etaSeconds)}
+                  {/if}
+                </div>
+
+                <div class="col-span-1 text-right">
+                  {#if job.stage !== "completed" && job.stage !== "cancelled" && job.stage !== "failed"}
+                    <button
+                      type="button"
+                      onclick={() => onCancelJob(job.id)}
+                      class="text-[11px] font-semibold text-red-600 hover:text-red-700"
+                    >
+                      Cancel
+                    </button>
+                  {:else}
+                    <span class="text-[10px] text-[#9A9891]">—</span>
+                  {/if}
+                </div>
               </div>
+
+              {#if job.error}
+                <p
+                  class="rounded border border-red-200 bg-red-50 px-2.5 py-1 font-mono text-[10px] text-red-700"
+                >
+                  {job.error}
+                </p>
+              {/if}
             </div>
           {/each}
         </div>

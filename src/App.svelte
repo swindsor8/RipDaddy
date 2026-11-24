@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { invoke } from "@tauri-apps/api/core";
+  import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+  import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import { open } from "@tauri-apps/plugin-dialog";
   import { Store } from "@tauri-apps/plugin-store";
   import FirstRunSetupModal from "./lib/FirstRunSetupModal.svelte";
@@ -12,6 +13,7 @@
     defaultQualityProfileMap,
     qualityProfileKey,
     shortEncoderLabel,
+    shortResolutionLabel,
   } from "./lib/qualityDefaults";
   import type {
     AppSettings,
@@ -22,8 +24,13 @@
     BinaryPathsConfig,
     DeliveryTarget,
     DiscLabelGuess,
+    DiscScanResult,
     DiscTitle,
+    EnqueueJobRequest,
+    EpisodeInfo,
     ExternalIds,
+    FolderIdentifyResult,
+    IdentifiedVideoFile,
     MediaKind,
     MediaMetadata,
     MetadataProvider,
@@ -31,12 +38,16 @@
     MetadataSearchQuery,
     NamingConvention,
     OpticalDrive,
+    PipelineEvent,
     PipelineMode,
+    PreviewFrame,
     QualityProfile,
     QueueJob,
     ResolutionTier,
     SettingsCategory,
     StreamTrack,
+    TrickplayPreview,
+    VideoMediaInfo,
   } from "./lib/types";
 
   const SETTINGS_STORE_FILE = "settings.json";
@@ -84,16 +95,34 @@
   let previewOpen = $state(true);
   let queueExpanded = $state(false);
 
-  // Source selection & inspection state
+  // Source selection, scanning & preview sample state
   let drives = $state<OpticalDrive[]>([]);
   let selectedDriveIndex = $state<number | null>(null);
+  let activeDiscName = $state<string>("");
+  let scanningDrives = $state(false);
+  let scanningDisc = $state(false);
+  let scanStatusMessage = $state<string | null>(null);
   let titles = $state<DiscTitle[]>([]);
   let checkedTitleIds = $state<number[]>([]);
   let inspectedTitleId = $state<number | null>(null);
 
-  let localSourceFiles = $state<string[]>([]);
+  let localVideoItems = $state<IdentifiedVideoFile[]>([]);
   let checkedLocalFiles = $state<string[]>([]);
   let inspectedLocalFile = $state<string | null>(null);
+  let identifyingFolder = $state(false);
+  let folderIdentifyStatus = $state<string | null>(null);
+  let folderShowCandidates = $state<MediaMetadata[]>([]);
+  let seriesEpisodeCatalog = $state<EpisodeInfo[]>([]);
+
+  // Auto-generated trickplay frame preview cache & state
+  let trickplayCache = $state<Record<string, TrickplayPreview>>({});
+  let loadingTrickplayFor = $state<string | null>(null);
+  let trickplayError = $state<string | null>(null);
+  let trickplayRequestSeq = 0;
+
+  // Queue enqueue state
+  let queueingJobs = $state(false);
+  let queueActionError = $state<string | null>(null);
 
   // HandBrake active quality profile & container state
   let outputContainer = $state<string>("mkv");
@@ -160,6 +189,22 @@
     titles.find((t) => t.titleId === inspectedTitleId) ?? null,
   );
 
+  const inspectedLocalItem = $derived(
+    localVideoItems.find((item) => item.path === inspectedLocalFile) ?? null,
+  );
+
+  const totalLocalSizeBytes = $derived(
+    localVideoItems.reduce((sum, item) => sum + (item.fileSizeBytes ?? 0), 0),
+  );
+
+  const activeTrickplay = $derived(
+    inspectedLocalFile ? (trickplayCache[inspectedLocalFile] ?? null) : null,
+  );
+
+  const loadingActiveTrickplay = $derived(
+    Boolean(inspectedLocalFile && loadingTrickplayFor === inspectedLocalFile),
+  );
+
   const selectedCount = $derived(
     workflowMode === "encodeOnly"
       ? checkedLocalFiles.length
@@ -169,8 +214,8 @@
   const allRowsChecked = $derived.by(() => {
     if (workflowMode === "encodeOnly") {
       return (
-        localSourceFiles.length > 0 &&
-        checkedLocalFiles.length === localSourceFiles.length
+        localVideoItems.length > 0 &&
+        checkedLocalFiles.length === localVideoItems.length
       );
     }
     return titles.length > 0 && checkedTitleIds.length === titles.length;
@@ -178,6 +223,10 @@
 
   const resolvedOutputDir = $derived(
     settings.outputDir || binaries?.defaultPaths.outputDir || "Auto",
+  );
+
+  const resolvedTempDir = $derived(
+    settings.tempDir || binaries?.defaultPaths.tempDir || "",
   );
 
   const activeQualityProfile = $derived.by(() => {
@@ -205,13 +254,26 @@
 
   // Live output path preview backed by Rust's metadata::format_output_relative_path
   $effect(() => {
+    const activeItem =
+      workflowMode === "encodeOnly" ? inspectedLocalItem : null;
+    const previewSeason =
+      mediaKind === "tvEpisode"
+        ? (activeItem?.season ?? parsedSeason)
+        : null;
+    const previewEpisode =
+      mediaKind === "tvEpisode"
+        ? (activeItem?.episode ?? parsedStartEpisode)
+        : null;
+    const previewEpisodeTitle =
+      mediaKind === "tvEpisode" ? (activeItem?.episodeTitle ?? null) : null;
+
     const payload: MediaMetadata = {
       kind: mediaKind,
       title: mediaTitle,
       year: parsedYear,
-      season: mediaKind === "tvEpisode" ? parsedSeason : null,
-      episode: mediaKind === "tvEpisode" ? parsedStartEpisode : null,
-      episodeTitle: null,
+      season: previewSeason,
+      episode: previewEpisode,
+      episodeTitle: previewEpisodeTitle,
       ids: {
         imdbId: imdbId.trim() || null,
         tvdbId: tvdbId.trim() || null,
@@ -534,6 +596,241 @@
     }
   }
 
+  function currentMetadataConfig(): MetadataProviderConfig {
+    return {
+      omdbApiKey: settings.omdbApiKey,
+      tvdbApiKey: settings.tvdbApiKey,
+      tmdbApiKey: settings.tmdbApiKey,
+    };
+  }
+
+  function formatBytesHuman(bytes: number | null): string {
+    if (bytes === null || bytes <= 0) return "--";
+    const gb = bytes / (1024 * 1024 * 1024);
+    if (gb >= 1) return `${gb.toFixed(gb >= 10 ? 1 : 2)} GB`;
+    const mb = bytes / (1024 * 1024);
+    return `${mb.toFixed(0)} MB`;
+  }
+
+  function sanitizeClientFilename(input: string): string {
+    return input
+      .replace(/[<>:"/\\|?*]/g, " ")
+      .replace(/\s+/g, " ")
+      .replace(/\.+$/, "")
+      .trim();
+  }
+
+  function formatItemTargetFilename(
+    item: IdentifiedVideoFile,
+    rowIndex: number,
+  ): string {
+    const ext = outputContainer || "mkv";
+    const baseTitle = sanitizeClientFilename(
+      mediaTitle.trim() || item.fileName.replace(/\.[^.]+$/, ""),
+    );
+    const titleWithYear = parsedYear ? `${baseTitle} (${parsedYear})` : baseTitle;
+
+    if (mediaKind === "tvEpisode") {
+      const s = item.season ?? parsedSeason;
+      const e = item.episode ?? parsedStartEpisode + rowIndex;
+      const code = `S${String(s).padStart(2, "0")}E${String(e).padStart(2, "0")}`;
+      const epTitle = item.episodeTitle
+        ? sanitizeClientFilename(item.episodeTitle)
+        : "";
+      return epTitle
+        ? `${titleWithYear} - ${code} - ${epTitle}.${ext}`
+        : `${titleWithYear} - ${code}.${ext}`;
+    }
+
+    if (localVideoItems.length > 1 && mediaTitle.trim()) {
+      const stem = sanitizeClientFilename(item.fileName.replace(/\.[^.]+$/, ""));
+      return `${titleWithYear} - ${stem}.${ext}`;
+    }
+    return `${titleWithYear}.${ext}`;
+  }
+
+  function applyEpisodeCatalogToItems(catalog: EpisodeInfo[]): void {
+    seriesEpisodeCatalog = catalog;
+    if (catalog.length === 0 || localVideoItems.length === 0) return;
+
+    const byKey = new Map<string, EpisodeInfo>();
+    for (const ep of catalog) {
+      byKey.set(`${ep.season}:${ep.episode}`, ep);
+    }
+
+    localVideoItems = localVideoItems.map((item, idx) => {
+      const s = item.season ?? parsedSeason;
+      const e = item.episode ?? parsedStartEpisode + idx;
+      const official = byKey.get(`${s}:${e}`);
+      if (official) {
+        return {
+          ...item,
+          season: s,
+          episode: e,
+          episodeTitle: official.title,
+          matchedFromCatalog: true,
+        };
+      }
+      return {
+        ...item,
+        matchedFromCatalog: false,
+      };
+    });
+  }
+
+  function applyFolderIdentifyResult(
+    res: FolderIdentifyResult,
+    replaceList: boolean,
+  ): void {
+    if (replaceList) {
+      localVideoItems = res.files;
+      checkedLocalFiles = res.files.map((f) => f.path);
+    } else {
+      const byPath = new Map(res.files.map((f) => [f.path, f]));
+      const merged = localVideoItems.map((old) => byPath.get(old.path) ?? old);
+      for (const f of res.files) {
+        if (!merged.some((m) => m.path === f.path)) {
+          merged.push(f);
+        }
+      }
+      localVideoItems = merged;
+      const newPaths = res.files
+        .map((f) => f.path)
+        .filter((p) => !checkedLocalFiles.includes(p));
+      if (newPaths.length > 0) {
+        checkedLocalFiles = [...checkedLocalFiles, ...newPaths];
+      }
+    }
+
+    folderShowCandidates = res.showCandidates;
+    seriesEpisodeCatalog = res.episodesCatalog;
+    folderIdentifyStatus = res.statusMessage;
+
+    if (res.matchedShow) {
+      mediaKind = "tvEpisode";
+      mediaTitle = res.matchedShow.title;
+      mediaYearInput = res.matchedShow.year ? String(res.matchedShow.year) : "";
+      imdbId = res.matchedShow.ids.imdbId ?? "";
+      tvdbId = res.matchedShow.ids.tvdbId ?? "";
+      tmdbId = res.matchedShow.ids.tmdbId ?? "";
+      selectedPosterUrl = res.matchedShow.posterUrl;
+      selectedOverview = res.matchedShow.overview;
+      if (res.providerUsed) {
+        metadataProvider = res.providerUsed;
+      }
+    } else if (res.inferredShowQuery && !mediaTitle.trim()) {
+      mediaTitle = res.inferredShowQuery;
+      if (res.files.some((f) => f.episode !== null)) {
+        mediaKind = "tvEpisode";
+      }
+    }
+
+    const firstSeason = res.files.find((f) => f.season !== null)?.season;
+    if (firstSeason !== undefined && firstSeason !== null) {
+      seasonInput = String(firstSeason);
+    }
+    const firstEp = res.files.find((f) => f.episode !== null)?.episode;
+    if (firstEp !== undefined && firstEp !== null) {
+      startEpisodeInput = String(firstEp);
+    }
+
+    if (res.files.length > 0) {
+      inspectedLocalFile = res.files[0].path;
+      previewOpen = true;
+    }
+  }
+
+  async function pickLocalVideoFolder(): Promise<void> {
+    try {
+      const selected = await open({
+        title: "Select a TV season or video folder to identify & batch encode",
+        directory: true,
+        multiple: false,
+      });
+      if (typeof selected !== "string" || selected.trim().length === 0) return;
+
+      identifyingFolder = true;
+      queueActionError = null;
+      folderIdentifyStatus = "Scanning folder and identifying show & episodes...";
+      try {
+        const res = await invoke<FolderIdentifyResult>("identify_video_folder", {
+          folderPath: selected.trim(),
+          config: currentMetadataConfig(),
+        });
+        applyFolderIdentifyResult(res, true);
+      } catch (err) {
+        folderIdentifyStatus = null;
+        queueActionError = err instanceof Error ? err.message : String(err);
+      } finally {
+        identifyingFolder = false;
+      }
+    } catch (err) {
+      checkError =
+        err instanceof Error ? err.message : "Failed to open folder dialog.";
+    }
+  }
+
+  async function handleAutoIdentifyLoadedFiles(): Promise<void> {
+    if (localVideoItems.length === 0) return;
+    identifyingFolder = true;
+    queueActionError = null;
+    folderIdentifyStatus = "Identifying show & episode titles...";
+    try {
+      const res = await invoke<FolderIdentifyResult>("identify_video_files", {
+        filePaths: localVideoItems.map((item) => item.path),
+        config: currentMetadataConfig(),
+      });
+      applyFolderIdentifyResult(res, true);
+    } catch (err) {
+      folderIdentifyStatus = null;
+      queueActionError = err instanceof Error ? err.message : String(err);
+    } finally {
+      identifyingFolder = false;
+    }
+  }
+
+  function updateItemSeasonOrEpisode(
+    path: string,
+    field: "season" | "episode",
+    raw: string,
+  ): void {
+    const parsed = Number.parseInt(raw.trim(), 10);
+    const num = Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+
+    localVideoItems = localVideoItems.map((item) => {
+      if (item.path !== path) return item;
+      const nextSeason = field === "season" ? num : item.season;
+      const nextEpisode = field === "episode" ? num : item.episode;
+      let nextTitle = item.episodeTitle;
+      let matched = false;
+      if (nextSeason !== null && nextEpisode !== null) {
+        const official = seriesEpisodeCatalog.find(
+          (ep) => ep.season === nextSeason && ep.episode === nextEpisode,
+        );
+        if (official) {
+          nextTitle = official.title;
+          matched = true;
+        }
+      }
+      return {
+        ...item,
+        season: nextSeason,
+        episode: nextEpisode,
+        episodeTitle: nextTitle,
+        matchedFromCatalog: matched,
+      };
+    });
+  }
+
+  function clearLocalVideoItems(): void {
+    localVideoItems = [];
+    checkedLocalFiles = [];
+    inspectedLocalFile = null;
+    folderIdentifyStatus = null;
+    folderShowCandidates = [];
+    seriesEpisodeCatalog = [];
+  }
+
   async function pickLocalVideoFiles(): Promise<void> {
     try {
       const selected = await open({
@@ -547,21 +844,32 @@
           },
         ],
       });
-      const added: string[] = [];
+      const addedPaths: string[] = [];
       if (selected) {
         for (const item of selected) {
-          if (item.trim().length > 0 && !localSourceFiles.includes(item)) {
-            added.push(item);
+          if (
+            item.trim().length > 0 &&
+            !localVideoItems.some((existing) => existing.path === item)
+          ) {
+            addedPaths.push(item);
           }
         }
       }
 
-      if (added.length > 0) {
-        localSourceFiles = [...localSourceFiles, ...added];
-        checkedLocalFiles = [...checkedLocalFiles, ...added];
-        if (!inspectedLocalFile) {
-          inspectedLocalFile = added[0];
-        }
+      if (addedPaths.length > 0) {
+        const newItems: IdentifiedVideoFile[] = addedPaths.map((p) => ({
+          path: p,
+          fileName: fileBaseName(p),
+          fileSizeBytes: null,
+          season: null,
+          episode: null,
+          episodeTitle: null,
+          matchedFromCatalog: false,
+        }));
+        localVideoItems = [...localVideoItems, ...newItems];
+        checkedLocalFiles = [...checkedLocalFiles, ...addedPaths];
+        inspectedLocalFile = addedPaths[0];
+        previewOpen = true;
       }
     } catch (err) {
       checkError =
@@ -570,16 +878,27 @@
   }
 
   function removeLocalSourceFile(path: string): void {
-    localSourceFiles = localSourceFiles.filter((item) => item !== path);
+    localVideoItems = localVideoItems.filter((item) => item.path !== path);
     checkedLocalFiles = checkedLocalFiles.filter((item) => item !== path);
+    if (path in trickplayCache) {
+      const next = { ...trickplayCache };
+      delete next[path];
+      trickplayCache = next;
+    }
     if (inspectedLocalFile === path) {
-      inspectedLocalFile = localSourceFiles[0] ?? null;
+      inspectedLocalFile = localVideoItems[0]?.path ?? null;
+    }
+    if (localVideoItems.length === 0) {
+      folderIdentifyStatus = null;
+      folderShowCandidates = [];
     }
   }
 
   function toggleAllRows(): void {
     if (workflowMode === "encodeOnly") {
-      checkedLocalFiles = allRowsChecked ? [] : [...localSourceFiles];
+      checkedLocalFiles = allRowsChecked
+        ? []
+        : localVideoItems.map((item) => item.path);
     } else {
       checkedTitleIds = allRowsChecked ? [] : titles.map((t) => t.titleId);
     }
@@ -609,6 +928,507 @@
   function inspectTitle(titleId: number): void {
     inspectedTitleId = titleId;
     previewOpen = true;
+  }
+
+  async function handleScanDisc(driveIndex: number): Promise<void> {
+    scanningDisc = true;
+    scanStatusMessage = `Scanning disc in drive #${driveIndex}...`;
+    titles = [];
+    checkedTitleIds = [];
+    inspectedTitleId = null;
+
+    try {
+      const scan = await invoke<DiscScanResult>("scan_disc", {
+        driveIndex,
+        minLengthSeconds: settings.minTitleLengthSeconds,
+        config: currentBinaryConfig(),
+      });
+      titles = scan.titles;
+      activeDiscName = scan.discName;
+
+      if (scan.titles.length > 0) {
+        if (mediaKind === "tvEpisode") {
+          checkedTitleIds = scan.titles.map((t) => t.titleId);
+        } else {
+          // Auto-select the longest title (typically the main feature)
+          let longest = scan.titles[0];
+          for (const t of scan.titles) {
+            if ((t.durationSeconds ?? 0) > (longest.durationSeconds ?? 0)) {
+              longest = t;
+            }
+          }
+          checkedTitleIds = [longest.titleId];
+        }
+        inspectedTitleId = checkedTitleIds[0] ?? scan.titles[0].titleId;
+        scanStatusMessage = null;
+      } else {
+        scanStatusMessage = `No titles >= ${settings.minTitleLengthSeconds}s found on drive #${driveIndex}.`;
+      }
+
+      // Auto-populate the Metadata Strip from the disc label if blank
+      if (scan.discName && !mediaTitle.trim()) {
+        try {
+          const guess = await invoke<DiscLabelGuess>("clean_disc_label", {
+            rawLabel: scan.discName,
+          });
+          if (guess.cleanedTitle) mediaTitle = guess.cleanedTitle;
+          if (guess.guessedYear) mediaYearInput = String(guess.guessedYear);
+          if (guess.guessedSeason) {
+            mediaKind = "tvEpisode";
+            seasonInput = String(guess.guessedSeason);
+            checkedTitleIds = scan.titles.map((t) => t.titleId);
+          }
+        } catch {
+          mediaTitle = scan.discName;
+        }
+      }
+    } catch (err) {
+      scanStatusMessage = err instanceof Error ? err.message : String(err);
+    } finally {
+      scanningDisc = false;
+    }
+  }
+
+  async function handleScanDrives(): Promise<void> {
+    scanningDrives = true;
+    scanStatusMessage = "Scanning optical drives...";
+    try {
+      const found = await invoke<OpticalDrive[]>("scan_drives", {
+        config: currentBinaryConfig(),
+      });
+      drives = found;
+
+      if (found.length === 0) {
+        selectedDriveIndex = null;
+        titles = [];
+        checkedTitleIds = [];
+        scanStatusMessage =
+          "No usable optical drives detected. Insert a disc and try again.";
+        return;
+      }
+
+      const withDisc =
+        found.find((d) => d.discName.trim().length > 0 || d.visible === 2) ??
+        found[0];
+      selectedDriveIndex = withDisc.index;
+      activeDiscName = withDisc.discName;
+
+      if (withDisc.discName.trim().length > 0 || withDisc.visible === 2) {
+        await handleScanDisc(withDisc.index);
+      } else {
+        titles = [];
+        checkedTitleIds = [];
+        scanStatusMessage = `Detected ${found.length} drive(s), but no disc is inserted.`;
+      }
+    } catch (err) {
+      scanStatusMessage = err instanceof Error ? err.message : String(err);
+    } finally {
+      scanningDrives = false;
+    }
+  }
+
+  function formatTimestampLabel(seconds: number): string {
+    const total = Math.max(0, Math.round(seconds));
+    const h = Math.floor(total / 3600);
+    const m = Math.floor((total % 3600) / 60);
+    const s = total % 60;
+    if (h > 0) {
+      return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+    }
+    return `${m}:${String(s).padStart(2, "0")}`;
+  }
+
+  function computeAspectLabel(w: number, h: number): string {
+    const ratio = w / h;
+    const named: [number, string][] = [
+      [4 / 3, "4:3"],
+      [3 / 2, "3:2"],
+      [16 / 10, "16:10"],
+      [16 / 9, "16:9"],
+      [1.85, "1.85:1"],
+      [2.35, "2.35:1"],
+      [2.39, "2.39:1"],
+    ];
+    for (const [target, label] of named) {
+      if (Math.abs(ratio - target) <= 0.025) return label;
+    }
+    return `${ratio.toFixed(2)}:1`;
+  }
+
+  async function extractBrowserFallbackFrames(
+    filePath: string,
+    baseInfo: VideoMediaInfo,
+    frameCount = 8,
+  ): Promise<TrickplayPreview | null> {
+    let videoUrl: string;
+    try {
+      videoUrl = convertFileSrc(filePath);
+    } catch {
+      return null;
+    }
+
+    const video = document.createElement("video");
+    video.muted = true;
+    video.preload = "auto";
+    video.crossOrigin = "anonymous";
+    video.src = videoUrl;
+
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const timer = window.setTimeout(
+          () => reject(new Error("Timed out loading video metadata")),
+          6000,
+        );
+        video.onloadedmetadata = () => {
+          window.clearTimeout(timer);
+          resolve();
+        };
+        video.onerror = () => {
+          window.clearTimeout(timer);
+          reject(new Error("Browser codec unsupported"));
+        };
+      });
+
+      const w = video.videoWidth;
+      const h = video.videoHeight;
+      const dur = Number.isFinite(video.duration) ? video.duration : 0;
+      if (w <= 0 || h <= 0) return null;
+
+      const timestamps: number[] = [];
+      if (dur <= 1) {
+        timestamps.push(0);
+      } else {
+        const start = dur * 0.08;
+        const end = dur * 0.92;
+        const span = Math.max(0.5, end - start);
+        for (let i = 0; i < frameCount; i++) {
+          timestamps.push(start + (span * i) / Math.max(1, frameCount - 1));
+        }
+      }
+
+      const scale = Math.min(1, 1280 / w);
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.max(2, Math.round(w * scale));
+      canvas.height = Math.max(2, Math.round(h * scale));
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return null;
+
+      const frames: PreviewFrame[] = [];
+      for (let i = 0; i < timestamps.length; i++) {
+        const ts = timestamps[i];
+        await new Promise<void>((resolve) => {
+          const timer = window.setTimeout(() => resolve(), 2500);
+          video.onseeked = () => {
+            window.clearTimeout(timer);
+            resolve();
+          };
+          video.currentTime = ts;
+        });
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        const dataUrl = canvas.toDataURL("image/jpeg", 0.85);
+        frames.push({
+          index: i,
+          timestampSeconds: ts,
+          timestampLabel: formatTimestampLabel(ts),
+          path: dataUrl,
+        });
+      }
+
+      const mergedInfo: VideoMediaInfo = {
+        ...baseInfo,
+        width: baseInfo.width ?? w,
+        height: baseInfo.height ?? h,
+        displayWidth: baseInfo.displayWidth ?? w,
+        displayHeight: baseInfo.displayHeight ?? h,
+        displayAspectRatio:
+          baseInfo.displayAspectRatio ?? computeAspectLabel(w, h),
+        durationSeconds: baseInfo.durationSeconds ?? (dur > 0 ? dur : null),
+      };
+
+      return {
+        sourcePath: filePath,
+        mediaInfo: mergedInfo,
+        frames,
+        extractor: "browserCanvas",
+        cached: false,
+        note: null,
+      };
+    } catch {
+      return null;
+    } finally {
+      video.removeAttribute("src");
+      video.load();
+    }
+  }
+
+  async function loadTrickplayPreview(
+    filePath: string,
+    forceRegenerate = false,
+  ): Promise<void> {
+    if (!forceRegenerate && trickplayCache[filePath]) {
+      trickplayError = null;
+      return;
+    }
+
+    const reqId = ++trickplayRequestSeq;
+    loadingTrickplayFor = filePath;
+    trickplayError = null;
+
+    try {
+      const effectiveTemp = resolvedTempDir || null;
+      let result = await invoke<TrickplayPreview>(
+        "generate_trickplay_preview",
+        {
+          inputPath: filePath,
+          tempDir: effectiveTemp,
+          frameCount: 8,
+          forceRegenerate,
+          config: currentBinaryConfig(),
+        },
+      );
+
+      if (reqId !== trickplayRequestSeq) return;
+
+      if (result.frames.length === 0 && result.extractor === "browserFallback") {
+        const fallback = await extractBrowserFallbackFrames(
+          filePath,
+          result.mediaInfo,
+          8,
+        );
+        if (reqId !== trickplayRequestSeq) return;
+        if (fallback && fallback.frames.length > 0) {
+          result = fallback;
+        }
+      }
+
+      trickplayCache = {
+        ...trickplayCache,
+        [filePath]: result,
+      };
+    } catch (err) {
+      if (reqId === trickplayRequestSeq) {
+        trickplayError = err instanceof Error ? err.message : String(err);
+      }
+    } finally {
+      if (reqId === trickplayRequestSeq) {
+        loadingTrickplayFor = null;
+      }
+    }
+  }
+
+  // Automatically generate trickplay preview frames whenever a local video file is selected
+  $effect(() => {
+    const file = inspectedLocalFile;
+    const mode = workflowMode;
+    if (mode === "encodeOnly" && file) {
+      void loadTrickplayPreview(file, false);
+    }
+  });
+
+  function buildJobMetadata(
+    rowIndex: number,
+    fallbackTitle: string,
+    totalSelected: number,
+    rowOverride?: {
+      season: number | null;
+      episode: number | null;
+      episodeTitle: string | null;
+    },
+  ): MediaMetadata {
+    const trimmed = mediaTitle.trim();
+    let chosenTitle: string;
+    if (mediaKind === "tvEpisode") {
+      chosenTitle = trimmed || fallbackTitle;
+    } else if (!trimmed) {
+      chosenTitle = fallbackTitle;
+    } else if (totalSelected > 1 && rowIndex > 0) {
+      chosenTitle = `${trimmed} - ${fallbackTitle}`;
+    } else {
+      chosenTitle = trimmed;
+    }
+    return {
+      kind: mediaKind,
+      title: chosenTitle,
+      year: parsedYear,
+      season:
+        mediaKind === "tvEpisode"
+          ? (rowOverride?.season ?? parsedSeason)
+          : null,
+      episode:
+        mediaKind === "tvEpisode"
+          ? (rowOverride?.episode ?? parsedStartEpisode + rowIndex)
+          : null,
+      episodeTitle:
+        mediaKind === "tvEpisode" ? (rowOverride?.episodeTitle ?? null) : null,
+      ids: {
+        imdbId: imdbId.trim() || null,
+        tvdbId: tvdbId.trim() || null,
+        tmdbId: tmdbId.trim() || null,
+      },
+      overview: selectedOverview,
+      posterUrl: selectedPosterUrl,
+    };
+  }
+
+  async function handleEnqueueSelected(): Promise<void> {
+    if (!modeReady || selectedCount === 0) return;
+    queueingJobs = true;
+    queueActionError = null;
+
+    try {
+      const requests: EnqueueJobRequest[] = [];
+      const activeDrive = drives.find((d) => d.index === selectedDriveIndex);
+      const effectiveOutputDir =
+        settings.outputDir || binaries?.defaultPaths.outputDir || "";
+      const effectiveTempDir =
+        settings.tempDir || binaries?.defaultPaths.tempDir || "";
+
+      if (workflowMode === "encodeOnly") {
+        const ordered = localVideoItems.filter((item) =>
+          checkedLocalFiles.includes(item.path),
+        );
+        ordered.forEach((item, idx) => {
+          const base = item.fileName.replace(/\.[^.]+$/, "");
+          const epSeason = item.season ?? parsedSeason;
+          const epNum = item.episode ?? parsedStartEpisode + idx;
+          const epCode = `S${String(epSeason).padStart(2, "0")}E${String(epNum).padStart(2, "0")}`;
+          const titleLabel =
+            mediaTitle.trim() && mediaKind === "tvEpisode"
+              ? item.episodeTitle
+                ? `${mediaTitle.trim()} ${epCode} - ${item.episodeTitle}`
+                : `${mediaTitle.trim()} ${epCode}`
+              : ordered.length === 1 && mediaTitle.trim()
+                ? mediaTitle.trim()
+                : base;
+          requests.push({
+            mode: "encodeOnly",
+            discName: "Local File",
+            driveIndex: null,
+            driveDevicePath: null,
+            titleId: null,
+            sourceFilePath: item.path,
+            titleName: titleLabel,
+            qualityProfile: activeQualityProfile,
+            customPresetFile: settings.customPresetFile,
+            customPresetName: settings.defaultPreset,
+            tempDir: effectiveTempDir,
+            outputDir: effectiveOutputDir,
+            keepTempMkv: settings.keepTempMkv,
+            autoEjectDisc: false,
+            namingConvention,
+            mediaMetadata: buildJobMetadata(idx, base, ordered.length, {
+              season: item.season,
+              episode: item.episode,
+              episodeTitle: item.episodeTitle,
+            }),
+          });
+        });
+      } else {
+        const ordered = titles.filter((t) =>
+          checkedTitleIds.includes(t.titleId),
+        );
+        ordered.forEach((title, idx) => {
+          const fallback = title.name ?? `Title_${title.titleId}`;
+          const titleLabel =
+            mediaTitle.trim() && mediaKind === "tvEpisode"
+              ? `${mediaTitle.trim()} ${episodeCodeForRow(idx)}`
+              : ordered.length === 1 && mediaTitle.trim()
+                ? mediaTitle.trim()
+                : fallback;
+          requests.push({
+            mode: workflowMode,
+            discName: activeDiscName || activeDrive?.discName || "Optical Disc",
+            driveIndex: selectedDriveIndex,
+            driveDevicePath: activeDrive?.devicePath ?? null,
+            titleId: title.titleId,
+            sourceFilePath: null,
+            titleName: titleLabel,
+            qualityProfile:
+              workflowMode === "ripOnly" ? null : activeQualityProfile,
+            customPresetFile:
+              workflowMode === "ripOnly" ? null : settings.customPresetFile,
+            customPresetName:
+              workflowMode === "ripOnly" ? null : settings.defaultPreset,
+            tempDir: effectiveTempDir,
+            outputDir: effectiveOutputDir,
+            keepTempMkv: settings.keepTempMkv,
+            autoEjectDisc: settings.autoEjectDisc && idx === ordered.length - 1,
+            namingConvention,
+            mediaMetadata: buildJobMetadata(idx, fallback, ordered.length),
+          });
+        });
+      }
+
+      const added = await invoke<QueueJob[]>("enqueue_jobs", {
+        requests,
+        config: currentBinaryConfig(),
+      });
+
+      const merged = [...queueJobs];
+      for (const job of added) {
+        const existingIdx = merged.findIndex((j) => j.id === job.id);
+        if (existingIdx >= 0) {
+          merged[existingIdx] = job;
+        } else {
+          merged.push(job);
+        }
+      }
+      queueJobs = merged;
+      queueExpanded = true;
+    } catch (err) {
+      queueActionError = err instanceof Error ? err.message : String(err);
+    } finally {
+      queueingJobs = false;
+    }
+  }
+
+  async function handleClearFinished(): Promise<void> {
+    try {
+      queueJobs = await invoke<QueueJob[]>("clear_finished_jobs");
+    } catch {
+      // Ignore outside Tauri runtime.
+    }
+  }
+
+  function applyPipelineEvent(event: PipelineEvent): void {
+    switch (event.type) {
+      case "jobUpdated": {
+        const idx = queueJobs.findIndex((j) => j.id === event.job.id);
+        if (idx >= 0) {
+          queueJobs[idx] = event.job;
+        } else {
+          queueJobs = [...queueJobs, event.job];
+        }
+        break;
+      }
+      case "progress": {
+        const idx = queueJobs.findIndex((j) => j.id === event.jobId);
+        if (idx >= 0) {
+          queueJobs[idx] = {
+            ...queueJobs[idx],
+            progress: event.progress,
+          };
+        }
+        break;
+      }
+      case "stageChanged": {
+        const idx = queueJobs.findIndex((j) => j.id === event.jobId);
+        if (idx >= 0) {
+          queueJobs[idx] = {
+            ...queueJobs[idx],
+            stage: event.to,
+            progress: {
+              ...queueJobs[idx].progress,
+              stage: event.to,
+            },
+          };
+        }
+        break;
+      }
+      case "logLine":
+      case "tempCleaned":
+        break;
+    }
   }
 
   async function handleCleanCurrentTitle(): Promise<void> {
@@ -648,14 +1468,9 @@
         kind: mediaKind,
         provider: metadataProvider,
       };
-      const config: MetadataProviderConfig = {
-        omdbApiKey: settings.omdbApiKey,
-        tvdbApiKey: settings.tvdbApiKey,
-        tmdbApiKey: settings.tmdbApiKey,
-      };
       const results = await invoke<MediaMetadata[]>("search_metadata", {
         query,
-        config,
+        config: currentMetadataConfig(),
       });
       if (results.length === 0) {
         metadataLookupStatus = "No matches found. Try a shorter title or another provider.";
@@ -687,20 +1502,48 @@
       settings.tmdbApiKey
     ) {
       try {
-        const config: MetadataProviderConfig = {
-          omdbApiKey: settings.omdbApiKey,
-          tvdbApiKey: settings.tvdbApiKey,
-          tmdbApiKey: settings.tmdbApiKey,
-        };
         const ext = await invoke<ExternalIds>("fetch_tmdb_external_ids", {
           kind: item.kind,
           tmdbId: item.ids.tmdbId,
-          config,
+          config: currentMetadataConfig(),
         });
         if (ext.imdbId) imdbId = ext.imdbId;
         if (ext.tvdbId) tvdbId = ext.tvdbId;
       } catch {
         // Keep the TMDB ID even if secondary external_ids call fails.
+      }
+    }
+
+    // When picking a TV show with local files loaded, fetch official episode titles
+    // and re-apply uniform episode naming across every row automatically.
+    if (item.kind === "tvEpisode" && localVideoItems.length > 0) {
+      try {
+        const seasonsHint = Array.from(
+          new Set(
+            localVideoItems
+              .map((f) => f.season)
+              .filter((s): s is number => s !== null),
+          ),
+        );
+        const [prov, episodes] = await invoke<
+          [MetadataProvider, EpisodeInfo[]]
+        >("fetch_series_episodes", {
+          title: item.title,
+          ids: {
+            imdbId: imdbId.trim() || null,
+            tvdbId: tvdbId.trim() || null,
+            tmdbId: tmdbId.trim() || null,
+          },
+          seasonsHint: seasonsHint.length > 0 ? seasonsHint : [parsedSeason],
+          config: currentMetadataConfig(),
+        });
+        applyEpisodeCatalogToItems(episodes);
+        const matchedCount = localVideoItems.filter(
+          (f) => f.matchedFromCatalog,
+        ).length;
+        folderIdentifyStatus = `Matched "${item.title}" via ${prov.toUpperCase()} · ${matchedCount}/${localVideoItems.length} episodes matched`;
+      } catch {
+        // Keep user's show selection even if episode catalog lookup fails.
       }
     }
   }
@@ -781,7 +1624,24 @@
   }
 
   onMount(() => {
+    let unlisten: UnlistenFn | null = null;
+    void listen<PipelineEvent>("pipeline-event", (evt) => {
+      applyPipelineEvent(evt.payload);
+    })
+      .then((fn) => {
+        unlisten = fn;
+      })
+      .catch(() => {
+        // Ignore outside Tauri runtime.
+      });
+
     void initialize();
+
+    return () => {
+      if (unlisten) {
+        unlisten();
+      }
+    };
   });
 </script>
 
@@ -928,7 +1788,12 @@
           <select
             id="drive-select"
             bind:value={selectedDriveIndex}
-            disabled={!modeReady || drives.length === 0}
+            onchange={() => {
+              if (selectedDriveIndex !== null) {
+                void handleScanDisc(selectedDriveIndex);
+              }
+            }}
+            disabled={!modeReady || drives.length === 0 || scanningDisc}
             class="rounded-md border border-[#DFDDD6] bg-white px-2.5 py-1 text-xs font-medium text-[#111111] outline-none focus:border-[#111111] disabled:cursor-not-allowed disabled:bg-[#F2F0EA] disabled:text-[#8E8C85]"
           >
             {#if drives.length === 0}
@@ -944,24 +1809,47 @@
 
           <button
             type="button"
-            disabled={!modeReady}
+            onclick={() => void handleScanDrives()}
+            disabled={!modeReady || scanningDrives || scanningDisc}
             title={modeReady
-              ? "Scan optical drives once MakeMKV parser is wired"
+              ? "Scan connected optical drives and disc titles via makemkvcon"
               : "Configure makemkvcon in Settings"}
             class="rounded-md border border-[#DFDDD6] bg-white px-2.5 py-1 text-xs font-semibold text-[#111111] transition hover:bg-[#EFECE6] disabled:cursor-not-allowed disabled:opacity-50"
           >
-            Scan
+            {scanningDrives || scanningDisc ? "Scanning..." : "Scan"}
           </button>
         </div>
       {:else}
-        <button
-          type="button"
-          onclick={() => void pickLocalVideoFiles()}
-          disabled={!modeReady}
-          class="rounded-md bg-[#1D8BF8] px-3 py-1 text-xs font-semibold text-white transition hover:bg-[#137CE5] disabled:cursor-not-allowed disabled:bg-[#D8D6CF] disabled:text-[#787772]"
-        >
-          + Add Video Files
-        </button>
+        <div class="flex items-center gap-1.5">
+          <button
+            type="button"
+            onclick={() => void pickLocalVideoFolder()}
+            disabled={!modeReady || identifyingFolder}
+            title="Pick a TV season or video folder to auto-identify show + episodes and batch encode"
+            class="rounded-md bg-[#1D8BF8] px-3 py-1 text-xs font-semibold text-white transition hover:bg-[#137CE5] disabled:cursor-not-allowed disabled:bg-[#D8D6CF] disabled:text-[#787772]"
+          >
+            {identifyingFolder ? "Identifying..." : "+ Add Folder"}
+          </button>
+          <button
+            type="button"
+            onclick={() => void pickLocalVideoFiles()}
+            disabled={!modeReady || identifyingFolder}
+            class="rounded-md border border-[#DFDDD6] bg-white px-2.5 py-1 text-xs font-semibold text-[#111111] transition hover:bg-[#EFECE6] disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            + Add Files
+          </button>
+          {#if localVideoItems.length > 0}
+            <button
+              type="button"
+              onclick={() => void handleAutoIdentifyLoadedFiles()}
+              disabled={identifyingFolder}
+              title="Auto-identify show and episode numbers via TVDB, TMDB, or free TVMaze"
+              class="rounded-md border border-[#B5DAFA] bg-[#DCEEFF] px-2.5 py-1 text-xs font-semibold text-[#155CA2] transition hover:bg-[#CBE5FE] disabled:opacity-50"
+            >
+              Auto-Identify
+            </button>
+          {/if}
+        </div>
       {/if}
 
       {#if requiresHandBrake}
@@ -1064,10 +1952,15 @@
 
       <button
         type="button"
-        disabled={!modeReady || selectedCount === 0}
+        onclick={() => void handleEnqueueSelected()}
+        disabled={!modeReady || selectedCount === 0 || queueingJobs}
         class="rounded-md bg-[#111111] px-3.5 py-1.5 text-xs font-semibold text-white transition hover:bg-[#2A2A2A] disabled:cursor-not-allowed disabled:bg-[#C9C7C0] disabled:text-[#6B6A65]"
       >
-        {#if selectedCount > 0}
+        {#if queueingJobs}
+          Queueing...
+        {:else if selectedCount > 0 && workflowMode === "encodeOnly" && activeQualityProfile}
+          Encode {selectedCount} ({shortResolutionLabel(activeQualityProfile.resolution)} {activeQualityProfile.delivery === "local" ? "Local" : "Remote"}) →
+        {:else if selectedCount > 0}
           Queue {selectedCount} Selected →
         {:else if workflowMode === "ripOnly"}
           Start Rip Queue →
@@ -1373,6 +2266,71 @@
   <!-- Row 4: Full-Width Clay Data Table + Toggleable Right Preview Drawer -->
   <div class="flex min-h-0 flex-1 overflow-hidden">
     <main class="flex min-w-0 flex-1 flex-col overflow-hidden bg-white">
+      {#if queueActionError}
+        <div
+          class="flex shrink-0 items-center justify-between gap-3 border-b border-red-200 bg-red-50 px-5 py-2 text-xs text-red-700"
+        >
+          <span class="truncate font-mono text-[11px]">{queueActionError}</span>
+          <button
+            type="button"
+            onclick={() => (queueActionError = null)}
+            class="shrink-0 font-semibold text-red-700 hover:underline"
+          >
+            Dismiss
+          </button>
+        </div>
+      {/if}
+      {#if workflowMode === "encodeOnly" && (folderIdentifyStatus || localVideoItems.length > 0)}
+        <div
+          class="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-[#E5E3DD] bg-[#FAF9F6] px-5 py-1.5 text-[11px]"
+        >
+          <div class="flex min-w-0 flex-wrap items-center gap-2">
+            {#if localVideoItems.length > 0}
+              <span
+                class="rounded-full border border-[#E5E3DD] bg-white px-2 py-0.5 font-mono text-[10px] font-semibold text-[#111111]"
+              >
+                {localVideoItems.length} file{localVideoItems.length === 1 ? "" : "s"}
+                {#if totalLocalSizeBytes > 0}
+                  · {formatBytesHuman(totalLocalSizeBytes)}
+                {/if}
+              </span>
+            {/if}
+            {#if folderIdentifyStatus}
+              <span class="truncate font-medium text-[#17462B]">
+                {folderIdentifyStatus}
+              </span>
+            {:else if activeQualityProfile}
+              <span class="text-[#5C5B57]">
+                All checked files encode uniformly to
+                <span class="font-mono font-semibold text-[#111111]">
+                  {shortResolutionLabel(activeQualityProfile.resolution)} {activeQualityProfile.delivery} · {shortEncoderLabel(activeQualityProfile.encoder)} · .{outputContainer}
+                </span>
+              </span>
+            {/if}
+          </div>
+
+          <div class="flex shrink-0 items-center gap-1.5">
+            {#if folderShowCandidates.length > 1}
+              <button
+                type="button"
+                onclick={() => (searchResults = folderShowCandidates)}
+                class="rounded border border-[#B5DAFA] bg-[#DCEEFF] px-2 py-0.5 text-[10px] font-semibold text-[#155CA2] hover:bg-[#CBE5FE]"
+              >
+                Switch Show ({folderShowCandidates.length})
+              </button>
+            {/if}
+            {#if localVideoItems.length > 0}
+              <button
+                type="button"
+                onclick={clearLocalVideoItems}
+                class="rounded border border-[#E5E3DD] bg-white px-2 py-0.5 text-[10px] font-medium text-[#6B6A65] hover:text-red-600"
+              >
+                Clear List
+              </button>
+            {/if}
+          </div>
+        </div>
+      {/if}
       <!-- Table Header -->
       {#if workflowMode === "encodeOnly"}
         <div
@@ -1382,14 +2340,15 @@
             <input
               type="checkbox"
               checked={allRowsChecked}
-              disabled={localSourceFiles.length === 0}
+              disabled={localVideoItems.length === 0}
               onchange={toggleAllRows}
               aria-label="Select all video files"
               class="h-3.5 w-3.5 accent-[#111111]"
             />
           </div>
-          <div class="col-span-5">Video File</div>
-          <div class="col-span-4">Source Path</div>
+          <div class="col-span-2">{mediaKind === "tvEpisode" ? "Episode" : "#"}</div>
+          <div class="col-span-6">Source File → Uniform Output Name</div>
+          <div class="col-span-1 text-right">Size</div>
           <div class="col-span-2 text-right">Actions</div>
         </div>
       {:else}
@@ -1417,7 +2376,7 @@
       <!-- Scrollable Table Body -->
       <div class="flex-1 overflow-y-auto">
         {#if workflowMode === "encodeOnly"}
-          {#if localSourceFiles.length === 0}
+          {#if localVideoItems.length === 0}
             <div
               class="flex h-full flex-col items-center justify-center px-6 py-16 text-center"
             >
@@ -1437,30 +2396,40 @@
                 </svg>
               </div>
               <h2 class="text-sm font-bold tracking-[-0.01em] text-[#111111]">
-                Drop or add local video files to encode
+                Add a TV season folder or video files to batch encode
               </h2>
               <p class="mt-1 max-w-md text-xs leading-relaxed text-[#787772]">
-                Select existing <span class="font-mono text-[#111111]">.mkv</span>,
-                <span class="font-mono text-[#111111]">.mp4</span>, or
-                <span class="font-mono text-[#111111]">.m2ts</span> files to preview
-                playback and transcode with
-                <span class="font-mono text-[#111111]">HandBrakeCLI</span>.
+                Drop in an entire folder of oversized <span class="font-mono text-[#111111]">.mkv</span>
+                or <span class="font-mono text-[#111111]">.mp4</span> episodes. RipDaddy
+                automatically identifies the show and episodes via TVDB/TMDB/TVMaze,
+                uniforms all filenames, generates trickplay frames, and encodes the whole
+                folder with one quality profile.
               </p>
-              <button
-                type="button"
-                onclick={() => void pickLocalVideoFiles()}
-                disabled={!modeReady}
-                class="mt-4 rounded-md bg-[#1D8BF8] px-4 py-2 text-xs font-semibold text-white transition hover:bg-[#137CE5] disabled:cursor-not-allowed disabled:bg-[#D8D6CF] disabled:text-[#787772]"
-              >
-                + Add Video Files
-              </button>
+              <div class="mt-4 flex flex-wrap items-center justify-center gap-2">
+                <button
+                  type="button"
+                  onclick={() => void pickLocalVideoFolder()}
+                  disabled={!modeReady || identifyingFolder}
+                  class="rounded-md bg-[#1D8BF8] px-4 py-2 text-xs font-semibold text-white transition hover:bg-[#137CE5] disabled:cursor-not-allowed disabled:bg-[#D8D6CF] disabled:text-[#787772]"
+                >
+                  {identifyingFolder ? "Scanning Folder..." : "+ Add TV / Video Folder"}
+                </button>
+                <button
+                  type="button"
+                  onclick={() => void pickLocalVideoFiles()}
+                  disabled={!modeReady || identifyingFolder}
+                  class="rounded-md border border-[#DFDDD6] bg-white px-4 py-2 text-xs font-semibold text-[#111111] transition hover:bg-[#F8F7F4] disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  + Add Video Files
+                </button>
+              </div>
             </div>
           {:else}
             <div class="divide-y divide-[#EFECE6]">
-              {#each localSourceFiles as filePath, idx (filePath)}
+              {#each localVideoItems as item, idx (item.path)}
                 <div
                   class={`grid grid-cols-12 items-center gap-2 px-5 py-2.5 text-xs transition ${
-                    inspectedLocalFile === filePath
+                    inspectedLocalFile === item.path
                       ? "bg-[#F0F7FF]"
                       : "hover:bg-[#FAF9F6]"
                   }`}
@@ -1468,45 +2437,100 @@
                   <div class="col-span-1 flex items-center">
                     <input
                       type="checkbox"
-                      checked={checkedLocalFiles.includes(filePath)}
-                      onchange={() => toggleLocalFileChecked(filePath)}
-                      aria-label={`Select ${fileBaseName(filePath)}`}
+                      checked={checkedLocalFiles.includes(item.path)}
+                      onchange={() => toggleLocalFileChecked(item.path)}
+                      aria-label={`Select ${item.fileName}`}
                       class="h-3.5 w-3.5 accent-[#111111]"
                     />
                   </div>
-                  <div class="col-span-5 flex min-w-0 items-center gap-2">
+
+                  <div class="col-span-2 flex items-center gap-1">
                     {#if mediaKind === "tvEpisode"}
-                      <span
-                        class="shrink-0 rounded border border-[#B5DAFA] bg-[#DCEEFF] px-1.5 py-0.5 font-mono text-[10px] font-semibold text-[#155CA2]"
-                      >
-                        {episodeCodeForRow(idx)}
+                      <span class="font-mono text-[10px] font-bold text-[#787772]">S</span>
+                      <input
+                        type="text"
+                        inputmode="numeric"
+                        aria-label={`Season for ${item.fileName}`}
+                        value={item.season ?? parsedSeason}
+                        onchange={(e) =>
+                          updateItemSeasonOrEpisode(
+                            item.path,
+                            "season",
+                            e.currentTarget.value,
+                          )}
+                        class="w-9 rounded border border-[#DFDDD6] bg-white px-1 py-0.5 text-center font-mono text-[11px] font-semibold text-[#111111] outline-none focus:border-[#1D8BF8]"
+                      />
+                      <span class="font-mono text-[10px] font-bold text-[#787772]">E</span>
+                      <input
+                        type="text"
+                        inputmode="numeric"
+                        aria-label={`Episode for ${item.fileName}`}
+                        value={item.episode ?? parsedStartEpisode + idx}
+                        onchange={(e) =>
+                          updateItemSeasonOrEpisode(
+                            item.path,
+                            "episode",
+                            e.currentTarget.value,
+                          )}
+                        class="w-9 rounded border border-[#DFDDD6] bg-white px-1 py-0.5 text-center font-mono text-[11px] font-semibold text-[#111111] outline-none focus:border-[#1D8BF8]"
+                      />
+                    {:else}
+                      <span class="font-mono text-[11px] text-[#787772]">
+                        #{idx + 1}
                       </span>
                     {/if}
-                    <button
-                      type="button"
-                      onclick={() => inspectLocalFile(filePath)}
-                      class="truncate text-left font-semibold text-[#111111] hover:text-[#1D8BF8]"
-                    >
-                      {fileBaseName(filePath)}
-                    </button>
                   </div>
-                  <div
-                    class="col-span-4 truncate font-mono text-[11px] text-[#787772]"
-                    title={filePath}
+
+                  <button
+                    type="button"
+                    onclick={() => inspectLocalFile(item.path)}
+                    class="col-span-6 min-w-0 text-left"
+                    title={item.path}
                   >
-                    {filePath}
+                    <div class="flex items-center gap-1.5">
+                      <span class="truncate font-semibold text-[#111111] hover:text-[#1D8BF8]">
+                        {item.fileName}
+                      </span>
+                      {#if item.matchedFromCatalog}
+                        <span
+                          title="Episode matched from official catalog"
+                          class="h-1.5 w-1.5 shrink-0 rounded-full bg-[#3AD27E]"
+                        ></span>
+                      {/if}
+                    </div>
+                    <div
+                      class="truncate font-mono text-[10px] text-[#155CA2]"
+                      title={formatItemTargetFilename(item, idx)}
+                    >
+                      → {formatItemTargetFilename(item, idx)}
+                    </div>
+                  </button>
+
+                  <div
+                    class={`col-span-1 text-right font-mono text-[11px] ${
+                      (item.fileSizeBytes ?? 0) >= 8_000_000_000
+                        ? "font-semibold text-[#B4690E]"
+                        : "text-[#52524E]"
+                    }`}
+                  >
+                    {formatBytesHuman(item.fileSizeBytes)}
                   </div>
+
                   <div class="col-span-2 flex items-center justify-end gap-2">
                     <button
                       type="button"
-                      onclick={() => inspectLocalFile(filePath)}
-                      class="rounded border border-[#DFDDD6] bg-white px-2 py-0.5 text-[10px] font-semibold text-[#111111] hover:bg-[#F8F7F4]"
+                      onclick={() => inspectLocalFile(item.path)}
+                      class={`rounded border px-2 py-0.5 text-[10px] font-semibold transition ${
+                        inspectedLocalFile === item.path
+                          ? "border-[#3894E2] bg-[#DCEEFF] text-[#155CA2]"
+                          : "border-[#DFDDD6] bg-white text-[#111111] hover:bg-[#F8F7F4]"
+                      }`}
                     >
-                      Preview
+                      {inspectedLocalFile === item.path ? "Viewing" : "Frames"}
                     </button>
                     <button
                       type="button"
-                      onclick={() => removeLocalSourceFile(filePath)}
+                      onclick={() => removeLocalSourceFile(item.path)}
                       class="text-[11px] font-medium text-[#787772] hover:text-red-600"
                     >
                       Remove
@@ -1536,14 +2560,20 @@
               </svg>
             </div>
             <h2 class="text-sm font-bold tracking-[-0.01em] text-[#111111]">
-              No disc titles loaded
+              {scanningDrives || scanningDisc
+                ? "Scanning optical disc..."
+                : "No disc titles loaded"}
             </h2>
             <p class="mt-1 max-w-md text-xs leading-relaxed text-[#787772]">
-              Insert a DVD or Blu-ray and click
-              <span class="font-semibold text-[#111111]">Scan</span> to populate
-              titles, durations, chapters, and selectable video/audio/subtitle
-              track pills (filtering titles shorter than
-              <span class="font-mono text-[#111111]">{settings.minTitleLengthSeconds}s</span>).
+              {#if scanStatusMessage}
+                {scanStatusMessage}
+              {:else}
+                Insert a DVD or Blu-ray and click
+                <span class="font-semibold text-[#111111]">Scan</span> to populate
+                titles, durations, chapters, and selectable video/audio/subtitle
+                track pills (filtering titles shorter than
+                <span class="font-mono text-[#111111]">{settings.minTitleLengthSeconds}s</span>).
+              {/if}
             </p>
             {#if !modeReady}
               <button
@@ -1552,6 +2582,14 @@
                 class="mt-4 rounded-md border border-[#DDA12D] bg-[#FEF7E4] px-3.5 py-1.5 text-xs font-semibold text-[#5C4107] hover:bg-[#FCEEC8]"
               >
                 Open Settings → External CLIs
+              </button>
+            {:else if !scanningDrives && !scanningDisc}
+              <button
+                type="button"
+                onclick={() => void handleScanDrives()}
+                class="mt-4 rounded-md bg-[#1D8BF8] px-4 py-2 text-xs font-semibold text-white transition hover:bg-[#137CE5]"
+              >
+                Scan Optical Drives
               </button>
             {/if}
           </div>
@@ -1640,6 +2678,14 @@
         {mediaTitle}
         mediaYear={parsedYear}
         mediaOverview={selectedOverview}
+        trickplay={activeTrickplay}
+        loadingTrickplay={loadingActiveTrickplay}
+        {trickplayError}
+        onRegenerateFrames={() => {
+          if (inspectedLocalFile) {
+            void loadTrickplayPreview(inspectedLocalFile, true);
+          }
+        }}
         onClose={() => (previewOpen = false)}
         onEditQuality={() => openSettingsAt("encoding")}
       />
@@ -1652,6 +2698,7 @@
     jobs={queueJobs}
     onToggleExpanded={() => (queueExpanded = !queueExpanded)}
     onCancelJob={(jobId) => void handleCancelJob(jobId)}
+    onClearFinished={() => void handleClearFinished()}
   />
 
   <!-- Categorized Settings Dropdown -->

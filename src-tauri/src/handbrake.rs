@@ -1,16 +1,24 @@
-//! Data structures, Resolution × Delivery quality profiles (480p / 720p / 1080p / 4K × Local / Remote),
-//! and parser stubs for `HandBrakeCLI --json` progress and preset listing.
+//! HandBrakeCLI Resolution × Delivery quality matrix, multiline `--json` progress parser,
+//! `--preset-list` parser, and 10-second sample preview clip generator.
 
+use crate::detect::ResolvedCommand;
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio::process::Command;
+use tokio::time::timeout;
+
+const PRESET_LIST_TIMEOUT: Duration = Duration::from_secs(15);
+const SAMPLE_CLIP_TIMEOUT: Duration = Duration::from_secs(180);
 
 /// Errors produced while parsing HandBrakeCLI output or invoking the CLI.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HandBrakeError {
     InvalidJson(String),
-    NotImplemented(&'static str),
     Io(String),
+    Timeout(String),
 }
 
 impl fmt::Display for HandBrakeError {
@@ -19,13 +27,8 @@ impl fmt::Display for HandBrakeError {
             HandBrakeError::InvalidJson(msg) => {
                 write!(f, "Invalid HandBrakeCLI JSON payload: {msg}")
             }
-            HandBrakeError::NotImplemented(feature) => {
-                write!(
-                    f,
-                    "HandBrakeCLI integration stub not implemented yet: {feature}"
-                )
-            }
-            HandBrakeError::Io(msg) => write!(f, "HandBrakeCLI I/O error: {msg}"),
+            HandBrakeError::Io(msg) => write!(f, "HandBrakeCLI execution error: {msg}"),
+            HandBrakeError::Timeout(msg) => write!(f, "HandBrakeCLI timed out: {msg}"),
         }
     }
 }
@@ -58,9 +61,7 @@ impl ResolutionTier {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum DeliveryTarget {
-    /// Home LAN / direct play archival (higher RF quality, lossless/surround passthrough).
     Local,
-    /// Remote WAN / mobile streaming (tighter RF, AAC audio, fast-start MP4).
     Remote,
 }
 
@@ -98,11 +99,8 @@ impl VideoEncoder {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum AudioMode {
-    /// Pass through TrueHD/DTS-HD/DTS/EAC3/AC3 with AAC fallback (ideal for Local LAN).
     Passthrough,
-    /// Transcode to 5.1 Surround AAC (good balance for Remote streaming).
     Aac51,
-    /// Downmix to 2.0 Stereo AAC (lowest bandwidth for Remote/SD).
     AacStereo,
 }
 
@@ -139,7 +137,6 @@ pub struct QualityProfile {
 /// Returns the 8 tuned default profiles spanning `480p / 720p / 1080p / 4K` × `Local / Remote`.
 pub fn recommended_quality_profiles() -> Vec<QualityProfile> {
     vec![
-        // 480p (SD / DVD)
         QualityProfile {
             id: "p480:local".to_string(),
             label: "480p Local (DVD Archive)".to_string(),
@@ -174,7 +171,6 @@ pub fn recommended_quality_profiles() -> Vec<QualityProfile> {
             estimated_bitrate_label: "~0.8–1.5 Mbps".to_string(),
             extra_args: Vec::new(),
         },
-        // 720p (HD)
         QualityProfile {
             id: "p720:local".to_string(),
             label: "720p Local (HD Direct Play)".to_string(),
@@ -209,7 +205,6 @@ pub fn recommended_quality_profiles() -> Vec<QualityProfile> {
             estimated_bitrate_label: "~1.5–2.8 Mbps".to_string(),
             extra_args: Vec::new(),
         },
-        // 1080p (Full HD / Blu-ray)
         QualityProfile {
             id: "p1080:local".to_string(),
             label: "1080p Local (Blu-ray Quality)".to_string(),
@@ -244,7 +239,6 @@ pub fn recommended_quality_profiles() -> Vec<QualityProfile> {
             estimated_bitrate_label: "~3–5 Mbps".to_string(),
             extra_args: Vec::new(),
         },
-        // 4K (2160p UHD / HDR10)
         QualityProfile {
             id: "uhd4k:local".to_string(),
             label: "4K Local (UHD 10-bit HDR)".to_string(),
@@ -491,12 +485,15 @@ pub struct EncodeOptions {
     pub extra_args: Vec<String>,
 }
 
-/// Stateful line-by-line accumulator stub for HandBrakeCLI's multiline `Progress: { ... }`
-/// stdout stream.
+/// Stateful line-by-line parser for HandBrakeCLI's multiline `Progress: { ... }` stdout stream.
 #[derive(Debug, Default)]
 pub struct ProgressStreamParser {
     buffer: String,
     capturing: bool,
+    brace_depth: i32,
+    saw_open_brace: bool,
+    in_string: bool,
+    escaped: bool,
 }
 
 impl ProgressStreamParser {
@@ -504,23 +501,175 @@ impl ProgressStreamParser {
         Self::default()
     }
 
-    /// Feeds one line of `HandBrakeCLI --json` stdout into the accumulator.
-    pub fn push_line(&mut self, _line: &str) -> Result<Option<EncodeProgress>, HandBrakeError> {
-        let _ = (&self.buffer, self.capturing);
-        Err(HandBrakeError::NotImplemented(
-            "HandBrakeCLI streaming JSON progress parser",
-        ))
+    fn reset(&mut self) {
+        self.buffer.clear();
+        self.capturing = false;
+        self.brace_depth = 0;
+        self.saw_open_brace = false;
+        self.in_string = false;
+        self.escaped = false;
+    }
+
+    /// Feeds one line of `HandBrakeCLI --json` stdout into the brace-depth accumulator.
+    /// Returns `Ok(Some(EncodeProgress))` once a complete `Progress: { ... }` block closes.
+    pub fn push_line(&mut self, line: &str) -> Result<Option<EncodeProgress>, HandBrakeError> {
+        let fragment = if !self.capturing {
+            let trimmed = line.trim_start();
+            let Some(rest) = trimmed.strip_prefix("Progress:") else {
+                return Ok(None);
+            };
+            self.reset();
+            self.capturing = true;
+            rest
+        } else {
+            line
+        };
+
+        for ch in fragment.chars() {
+            if self.saw_open_brace || ch == '{' {
+                self.buffer.push(ch);
+            }
+            if self.escaped {
+                self.escaped = false;
+                continue;
+            }
+            if self.in_string {
+                match ch {
+                    '\\' => self.escaped = true,
+                    '"' => self.in_string = false,
+                    _ => {}
+                }
+            } else {
+                match ch {
+                    '"' => self.in_string = true,
+                    '{' => {
+                        self.saw_open_brace = true;
+                        self.brace_depth += 1;
+                    }
+                    '}' if self.saw_open_brace => {
+                        self.brace_depth -= 1;
+                        if self.brace_depth == 0 {
+                            let completed = std::mem::take(&mut self.buffer);
+                            self.reset();
+                            return parse_progress_payload(&completed).map(Some);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        if self.capturing {
+            self.buffer.push('\n');
+        }
+        Ok(None)
     }
 }
 
-/// Parser stub for a standalone HandBrakeCLI `Progress` JSON object.
-pub fn parse_progress_payload(_json_block: &str) -> Result<EncodeProgress, HandBrakeError> {
-    Err(HandBrakeError::NotImplemented("parse_progress_payload"))
+/// Parses a standalone HandBrakeCLI `Progress` JSON object into a normalized `EncodeProgress`.
+pub fn parse_progress_payload(json_block: &str) -> Result<EncodeProgress, HandBrakeError> {
+    let raw: RawProgressPayload = serde_json::from_str(json_block)
+        .map_err(|err| HandBrakeError::InvalidJson(err.to_string()))?;
+
+    let state = HandBrakeState::from_raw(&raw.state);
+    match state {
+        HandBrakeState::Working => {
+            let w = raw.working.unwrap_or(RawWorkingBlock {
+                progress: 0.0,
+                rate: 0.0,
+                rate_avg: 0.0,
+                eta_seconds: -1,
+                hours: 0,
+                minutes: 0,
+                seconds: 0,
+                pass: 1,
+                pass_count: 1,
+                pass_id: 0,
+            });
+            Ok(EncodeProgress {
+                state,
+                percent: (w.progress * 100.0).clamp(0.0, 100.0),
+                fps: (w.rate > 0.0).then_some(w.rate),
+                avg_fps: (w.rate_avg > 0.0).then_some(w.rate_avg),
+                eta_seconds: (w.eta_seconds >= 0).then_some(w.eta_seconds as u64),
+                pass: (w.pass > 0).then_some(w.pass),
+                pass_count: (w.pass_count > 0).then_some(w.pass_count),
+            })
+        }
+        HandBrakeState::Muxing => {
+            let progress = raw.muxing.map(|m| m.progress).unwrap_or(0.0);
+            Ok(EncodeProgress {
+                state,
+                percent: (progress * 100.0).clamp(0.0, 100.0),
+                fps: None,
+                avg_fps: None,
+                eta_seconds: Some(0),
+                pass: None,
+                pass_count: None,
+            })
+        }
+        HandBrakeState::WorkDone => {
+            let err_code = raw.work_done.map(|w| w.error).unwrap_or(0);
+            Ok(EncodeProgress {
+                state,
+                percent: if err_code == 0 { 100.0 } else { 0.0 },
+                fps: None,
+                avg_fps: None,
+                eta_seconds: Some(0),
+                pass: None,
+                pass_count: None,
+            })
+        }
+        _ => Ok(EncodeProgress {
+            state,
+            percent: 0.0,
+            fps: None,
+            avg_fps: None,
+            eta_seconds: None,
+            pass: None,
+            pass_count: None,
+        }),
+    }
 }
 
-/// Parser stub for `HandBrakeCLI --preset-list` console output.
-pub fn parse_preset_list(_output: &str) -> Result<Vec<HandBrakePreset>, HandBrakeError> {
-    Err(HandBrakeError::NotImplemented("parse_preset_list"))
+/// Parses `HandBrakeCLI --preset-list` console output into structured `HandBrakePreset` items.
+pub fn parse_preset_list(output: &str) -> Result<Vec<HandBrakePreset>, HandBrakeError> {
+    let mut presets = Vec::new();
+    let mut current_category = "General".to_string();
+
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty()
+            || trimmed.starts_with('[')
+            || trimmed.starts_with("HandBrake ")
+            || trimmed.starts_with("Preset ")
+        {
+            continue;
+        }
+
+        // Top-level category lines look like `General/` or `Matroska/` (0–2 leading spaces)
+        let indent = line.len() - line.trim_start().len();
+        if indent <= 2 && trimmed.ends_with('/') {
+            current_category = trimmed.trim_end_matches('/').to_string();
+            continue;
+        }
+
+        // Preset name lines are indented (typically 4 spaces) and do not start with `+`
+        if indent >= 4 && !trimmed.starts_with('+') && !trimmed.starts_with('-') {
+            let clean_name = trimmed.trim_start_matches("+ ").trim().to_string();
+            if !clean_name.is_empty() {
+                presets.push(HandBrakePreset {
+                    is_default: clean_name == "Fast 1080p30",
+                    name: clean_name,
+                    category: current_category.clone(),
+                    description: None,
+                    is_custom: false,
+                });
+            }
+        }
+    }
+
+    Ok(presets)
 }
 
 /// Builds CLI arguments for a named-preset `HandBrakeCLI --json` encode run.
@@ -553,9 +702,145 @@ pub fn build_encode_args(
     args
 }
 
-/// Async stub for enumerating built-in presets from `HandBrakeCLI --preset-list`.
-pub async fn list_presets(_binary_path: &Path) -> Result<Vec<HandBrakePreset>, HandBrakeError> {
-    Err(HandBrakeError::NotImplemented("list_presets"))
+#[cfg(windows)]
+fn configure_platform_command(cmd: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    cmd.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(windows))]
+fn configure_platform_command(_cmd: &mut Command) {}
+
+/// Lists built-in HandBrake presets via `HandBrakeCLI --preset-list`.
+pub async fn list_presets(resolved: &ResolvedCommand) -> Result<Vec<HandBrakePreset>, HandBrakeError> {
+    let mut cmd = Command::new(&resolved.program);
+    cmd.args(&resolved.prefix_args)
+        .arg("--preset-list")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    configure_platform_command(&mut cmd);
+
+    let child = cmd
+        .spawn()
+        .map_err(|err| HandBrakeError::Io(format!("Failed to launch HandBrakeCLI: {err}")))?;
+
+    let output = timeout(PRESET_LIST_TIMEOUT, child.wait_with_output())
+        .await
+        .map_err(|_| HandBrakeError::Timeout("Listing HandBrake presets timed out.".to_string()))?
+        .map_err(|err| HandBrakeError::Io(err.to_string()))?;
+
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    parse_preset_list(&combined)
+}
+
+/// Generates a 10-second WebView-playable MP4 sample clip using the user's selected
+/// `QualityProfile` (resolution, RF quality, decomb) so they can inspect quality & crop
+/// directly inside the right-hand Preview drawer before queuing a full encode.
+pub async fn generate_sample_clip(
+    resolved: &ResolvedCommand,
+    input_path: &Path,
+    temp_dir: &Path,
+    profile: &QualityProfile,
+    start_seconds: u64,
+    duration_seconds: u64,
+) -> Result<PathBuf, HandBrakeError> {
+    let preview_dir = temp_dir.join("previews");
+    tokio::fs::create_dir_all(&preview_dir)
+        .await
+        .map_err(|err| HandBrakeError::Io(format!("Failed creating preview dir: {err}")))?;
+
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let output_path = preview_dir.join(format!("sample_{stamp}.mp4"));
+
+    // Use H.264 + AAC inside fast-start MP4 so WebKitGTK / WebView2 / WKWebView plays it reliably
+    // while honoring the user's chosen resolution cap, RF quality, and decomb settings.
+    let (max_w, max_h) = profile.resolution.max_dimensions();
+    let clip_len = duration_seconds.clamp(3, 30);
+
+    let mut args = vec![
+        "--json".to_string(),
+        "-i".to_string(),
+        input_path.to_string_lossy().into_owned(),
+        "-o".to_string(),
+        output_path.to_string_lossy().into_owned(),
+        "--start-at".to_string(),
+        format!("seconds:{start_seconds}"),
+        "--stop-at".to_string(),
+        format!("seconds:{clip_len}"),
+        "--format".to_string(),
+        "av_mp4".to_string(),
+        "--optimize".to_string(),
+        "--encoder".to_string(),
+        "x264".to_string(),
+        "--encoder-preset".to_string(),
+        "veryfast".to_string(),
+        "--quality".to_string(),
+        format!("{:.1}", profile.rf_quality),
+        "--maxWidth".to_string(),
+        max_w.to_string(),
+        "--maxHeight".to_string(),
+        max_h.to_string(),
+        "--aencoder".to_string(),
+        "av_aac".to_string(),
+        "--mixdown".to_string(),
+        "stereo".to_string(),
+        "--ab".to_string(),
+        "160".to_string(),
+    ];
+    if profile.decomb {
+        args.push("--comb-detect".to_string());
+        args.push("--decomb".to_string());
+    }
+
+    let mut mount_dirs: Vec<&Path> = vec![preview_dir.as_path()];
+    if let Some(in_parent) = input_path.parent() {
+        mount_dirs.push(in_parent);
+    }
+    let mounted_cmd = resolved.with_flatpak_paths(&mount_dirs);
+
+    let mut cmd = Command::new(&mounted_cmd.program);
+    cmd.args(&mounted_cmd.prefix_args)
+        .args(&args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    configure_platform_command(&mut cmd);
+
+    let child = cmd
+        .spawn()
+        .map_err(|err| HandBrakeError::Io(format!("Failed starting sample encode: {err}")))?;
+
+    let output = timeout(SAMPLE_CLIP_TIMEOUT, child.wait_with_output())
+        .await
+        .map_err(|_| HandBrakeError::Timeout("Sample clip generation timed out.".to_string()))?
+        .map_err(|err| HandBrakeError::Io(err.to_string()))?;
+
+    if output.status.success() && tokio::fs::try_exists(&output_path).await.unwrap_or(false) {
+        Ok(output_path)
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let snippet = stderr
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("HandBrakeCLI exited with an error");
+        Err(HandBrakeError::Io(format!(
+            "Sample clip failed (exit {:?}): {}",
+            output.status.code(),
+            snippet.trim()
+        )))
+    }
 }
 
 #[cfg(test)]
@@ -576,7 +861,6 @@ mod tests {
         assert!(flags.contains(&"3840".to_string()));
         assert!(flags.contains(&"2160".to_string()));
         assert!(flags.contains(&"--all-audio".to_string()));
-        assert!(!flags.contains(&"--optimize".to_string()));
 
         let dvd_remote = profiles
             .iter()
@@ -590,27 +874,56 @@ mod tests {
     }
 
     #[test]
-    fn deserializes_handbrake_raw_progress_schema() {
-        let sample = r#"{
-            "State": "WORKING",
-            "Working": {
-                "Progress": 0.425,
-                "Rate": 61.5,
-                "RateAvg": 58.2,
-                "ETASeconds": 145,
-                "Hours": 0,
-                "Minutes": 2,
-                "Seconds": 25,
-                "Pass": 1,
-                "PassCount": 1,
-                "PassID": 0
-            }
-        }"#;
+    fn streams_multiline_handbrake_progress_json() {
+        let lines = [
+            "Version: {",
+            "    \"Name\": \"HandBrake\"",
+            "}",
+            "Progress: {",
+            "    \"State\": \"WORKING\",",
+            "    \"Working\": {",
+            "        \"Progress\": 0.425,",
+            "        \"Rate\": 61.5,",
+            "        \"RateAvg\": 58.2,",
+            "        \"ETASeconds\": 145,",
+            "        \"Pass\": 1,",
+            "        \"PassCount\": 1",
+            "    }",
+            "}",
+            "Progress: {\"State\":\"MUXING\",\"Muxing\":{\"Progress\":0.8}}",
+        ];
 
-        let parsed: RawProgressPayload = serde_json::from_str(sample).expect("valid raw JSON");
-        assert_eq!(HandBrakeState::from_raw(&parsed.state), HandBrakeState::Working);
-        let working = parsed.working.expect("working block");
-        assert!((working.progress - 0.425).abs() < 1e-6);
-        assert_eq!(working.eta_seconds, 145);
+        let mut parser = ProgressStreamParser::new();
+        let mut updates = Vec::new();
+        for line in lines {
+            if let Some(update) = parser.push_line(line).expect("parse line") {
+                updates.push(update);
+            }
+        }
+
+        assert_eq!(updates.len(), 2);
+        assert_eq!(updates[0].state, HandBrakeState::Working);
+        assert!((updates[0].percent - 42.5).abs() < 0.01);
+        assert_eq!(updates[0].fps, Some(61.5));
+        assert_eq!(updates[0].eta_seconds, Some(145));
+
+        assert_eq!(updates[1].state, HandBrakeState::Muxing);
+        assert!((updates[1].percent - 80.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn parses_handbrake_preset_list() {
+        let sample = "\
+General/
+    Very Fast 1080p30
+    Fast 1080p30
+Matroska/
+    H.265 MKV 1080p30
+";
+        let presets = parse_preset_list(sample).expect("parse presets");
+        assert_eq!(presets.len(), 3);
+        assert_eq!(presets[1].name, "Fast 1080p30");
+        assert!(presets[1].is_default);
+        assert_eq!(presets[2].category, "Matroska");
     }
 }

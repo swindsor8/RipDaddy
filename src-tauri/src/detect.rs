@@ -93,6 +93,39 @@ pub struct ResolvedCommand {
     pub prefix_args: Vec<String>,
 }
 
+impl ResolvedCommand {
+    /// Returns a copy of this command with extra Flatpak `--filesystem=<dir>` mounts
+    /// injected before the Flatpak app ID when running under `flatpak run`.
+    /// No-op for native binaries.
+    pub fn with_flatpak_paths(&self, dirs: &[&Path]) -> Self {
+        let is_flatpak = self.program.ends_with("flatpak")
+            || self.prefix_args.iter().any(|a| a == "flatpak");
+        if !is_flatpak {
+            return self.clone();
+        }
+        let Some(run_idx) = self.prefix_args.iter().position(|a| a == "run") else {
+            return self.clone();
+        };
+        let mut next_args = Vec::with_capacity(self.prefix_args.len() + dirs.len());
+        next_args.extend_from_slice(&self.prefix_args[..=run_idx]);
+        for dir in dirs {
+            if let Some(dir_str) = dir.to_str() {
+                if !dir_str.is_empty() {
+                    let flag = format!("--filesystem={dir_str}");
+                    if !next_args.contains(&flag) {
+                        next_args.push(flag);
+                    }
+                }
+            }
+        }
+        next_args.extend_from_slice(&self.prefix_args[run_idx + 1..]);
+        Self {
+            program: self.program.clone(),
+            prefix_args: next_args,
+        }
+    }
+}
+
 /// Platform-tailored guidance for installing a missing external CLI.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -271,17 +304,43 @@ pub async fn check_single_binary(
     }
 }
 
-/// Detects sensible default staging (temp MKV) and final output directories for this OS.
+/// Detects sensible disk-backed default staging (temp MKV) and final output directories.
+///
+/// Avoids `/tmp` on Linux because many distros mount `/tmp` as RAM-backed `tmpfs`,
+/// which can exhaust memory on 30–80 GB Blu-ray rips and is isolated inside Flatpak.
 pub fn detect_default_paths() -> DefaultPaths {
-    let temp_dir = env::temp_dir().join("ripdaddy");
-
     let home = home_dir();
     let output_dir = if let Some(xdg_videos) = env::var_os("XDG_VIDEOS_DIR") {
         PathBuf::from(xdg_videos).join("RipDaddy")
-    } else if let Some(home_dir) = home {
-        home_dir.join("Videos").join("RipDaddy")
+    } else if let Some(ref home_path) = home {
+        home_path.join("Videos").join("RipDaddy")
     } else {
         env::temp_dir().join("ripdaddy-output")
+    };
+
+    let temp_dir = if let Some(ref home_path) = home {
+        #[cfg(target_os = "macos")]
+        {
+            home_path.join("Library/Caches/RipDaddy/staging")
+        }
+        #[cfg(target_os = "windows")]
+        {
+            env::var_os("LOCALAPPDATA")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| home_path.clone())
+                .join("RipDaddy")
+                .join("staging")
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            env::var_os("XDG_CACHE_HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| home_path.join(".cache"))
+                .join("ripdaddy")
+                .join("staging")
+        }
+    } else {
+        env::temp_dir().join("ripdaddy")
     };
 
     DefaultPaths {
@@ -748,6 +807,97 @@ pub fn locate_binary(
     ))
 }
 
+/// Locates an optional companion CLI tool such as `ffmpeg` or `ffprobe` across
+/// `PATH`, common OS install locations, and (inside Linux `toolbox`/`distrobox`
+/// containers) the host filesystem via `flatpak-spawn --host`.
+pub fn locate_optional_tool(base_name: &str) -> Option<ResolvedCommand> {
+    #[cfg(target_os = "windows")]
+    let exe_names = [format!("{base_name}.exe")];
+    #[cfg(not(target_os = "windows"))]
+    let exe_names = [base_name.to_string()];
+
+    let name_refs: Vec<&str> = exe_names.iter().map(String::as_str).collect();
+    if let Some(found) = find_on_path(&name_refs) {
+        return Some(ResolvedCommand {
+            program: found.to_string_lossy().into_owned(),
+            prefix_args: Vec::new(),
+        });
+    }
+
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    #[cfg(target_os = "windows")]
+    {
+        let exe = &exe_names[0];
+        if let Some(local) = env::var_os("LOCALAPPDATA") {
+            let local_path = PathBuf::from(&local);
+            candidates.push(local_path.join("Microsoft\\WinGet\\Links").join(exe));
+            candidates.push(local_path.join("Programs\\ffmpeg\\bin").join(exe));
+        }
+        if let Some(profile) = env::var_os("USERPROFILE") {
+            candidates.push(PathBuf::from(profile).join("scoop\\shims").join(exe));
+        }
+        if let Some(pf) = env::var_os("ProgramFiles") {
+            candidates.push(PathBuf::from(pf).join("ffmpeg\\bin").join(exe));
+        }
+        candidates.push(PathBuf::from("C:\\ProgramData\\chocolatey\\bin").join(exe));
+        candidates.push(PathBuf::from("C:\\ffmpeg\\bin").join(exe));
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        for dir in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"] {
+            candidates.push(PathBuf::from(dir).join(base_name));
+        }
+        if let Some(home) = home_dir() {
+            candidates.push(home.join(".local/bin").join(base_name));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        for dir in [
+            "/usr/bin",
+            "/usr/local/bin",
+            "/home/linuxbrew/.linuxbrew/bin",
+        ] {
+            candidates.push(PathBuf::from(dir).join(base_name));
+        }
+        if let Some(home) = home_dir() {
+            candidates.push(home.join(".local/bin").join(base_name));
+        }
+    }
+
+    for candidate in candidates {
+        if is_executable_file(&candidate) {
+            return Some(ResolvedCommand {
+                program: candidate.to_string_lossy().into_owned(),
+                prefix_args: Vec::new(),
+            });
+        }
+    }
+
+    // Inside Linux toolbox/distrobox containers, delegate to host binary if installed there.
+    #[cfg(target_os = "linux")]
+    if in_linux_container() {
+        if let Some(spawn_bin) = find_on_path(&["flatpak-spawn"]) {
+            for host_path in [
+                format!("/usr/bin/{base_name}"),
+                format!("/usr/local/bin/{base_name}"),
+            ] {
+                let run_host_probe = PathBuf::from(format!("/run/host{host_path}"));
+                if is_executable_file(&run_host_probe) {
+                    return Some(ResolvedCommand {
+                        program: spawn_bin.to_string_lossy().into_owned(),
+                        prefix_args: vec!["--host".to_string(), host_path],
+                    });
+                }
+            }
+        }
+    }
+
+    None
+}
+
 #[cfg(target_os = "linux")]
 fn in_linux_container() -> bool {
     Path::new("/run/.toolboxenv").exists() || Path::new("/run/.containerenv").exists()
@@ -1154,5 +1304,41 @@ mod tests {
         );
         assert!(linux_mkv.can_auto_install);
         assert_eq!(linux_mkv.command, "flatpak install -y flathub com.makemkv.MakeMKV");
+    }
+
+    #[test]
+    fn injects_flatpak_filesystem_mounts_for_native_and_container_commands() {
+        let native = ResolvedCommand {
+            program: "/usr/bin/HandBrakeCLI".to_string(),
+            prefix_args: Vec::new(),
+        };
+        assert_eq!(
+            native.with_flatpak_paths(&[Path::new("/media/rips")]),
+            native
+        );
+
+        let container_flatpak = ResolvedCommand {
+            program: "/usr/bin/flatpak-spawn".to_string(),
+            prefix_args: vec![
+                "--host".to_string(),
+                "flatpak".to_string(),
+                "run".to_string(),
+                "--command=HandBrakeCLI".to_string(),
+                "fr.handbrake.ghb".to_string(),
+            ],
+        };
+        let mounted = container_flatpak
+            .with_flatpak_paths(&[Path::new("/mnt/staging"), Path::new("/mnt/staging")]);
+        assert_eq!(
+            mounted.prefix_args,
+            vec![
+                "--host",
+                "flatpak",
+                "run",
+                "--filesystem=/mnt/staging",
+                "--command=HandBrakeCLI",
+                "fr.handbrake.ghb",
+            ]
+        );
     }
 }

@@ -49,6 +49,15 @@ pub struct ExternalIds {
     pub tmdb_id: Option<String>,
 }
 
+/// Official episode entry returned by TVDB, TMDB, or keyless TVMaze.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EpisodeInfo {
+    pub season: u32,
+    pub episode: u32,
+    pub title: String,
+}
+
 impl ExternalIds {
     /// Normalizes raw IDs or pasted IMDb/TVDB/TMDB URLs into canonical ID tokens.
     pub fn normalized(&self) -> Self {
@@ -943,6 +952,377 @@ async fn search_tvmaze(
         .map_err(|err| MetadataError::ProviderError(err.to_string()))?;
 
     Ok(parse_tvmaze_response(&json))
+}
+
+/// Automatically searches the best available metadata service for a TV series
+/// (TVDB v4 if key is configured -> TMDB if key is configured -> keyless TVMaze fallback),
+/// returning `(provider_used, candidates)`.
+pub async fn auto_search_tv_series(
+    query: &str,
+    year: Option<u16>,
+    config: &MetadataProviderConfig,
+) -> Result<(MetadataProvider, Vec<MediaMetadata>), MetadataError> {
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        return Err(MetadataError::InvalidInput(
+            "Could not infer a show title from the selected folder or filenames.".to_string(),
+        ));
+    }
+
+    let client = build_http_client()?;
+
+    // 1. Prefer TVDB v4 if user configured a TVDB key
+    if let Some(tvdb_key) = config
+        .tvdb_api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|k| !k.is_empty())
+    {
+        if let Ok(results) =
+            search_tvdb(&client, trimmed, year, MediaKind::TvEpisode, tvdb_key).await
+        {
+            if !results.is_empty() {
+                return Ok((MetadataProvider::Tvdb, results));
+            }
+        }
+    }
+
+    // 2. Try TMDB if user configured a TMDB key/token
+    if let Some(tmdb_key) = config
+        .tmdb_api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|k| !k.is_empty())
+    {
+        if let Ok(mut results) =
+            search_tmdb(&client, trimmed, year, MediaKind::TvEpisode, tmdb_key).await
+        {
+            if !results.is_empty() {
+                // Hydrate top candidate with TVDB + IMDb external IDs
+                if let Some(tmdb_id) = results[0].ids.tmdb_id.clone() {
+                    if let Ok(ext) =
+                        fetch_tmdb_external_ids(MediaKind::TvEpisode, &tmdb_id, config.clone())
+                            .await
+                    {
+                        results[0].ids = ext;
+                    }
+                }
+                return Ok((MetadataProvider::Tmdb, results));
+            }
+        }
+    }
+
+    // 3. Always-available keyless TVMaze fallback (includes TVDB + IMDb external IDs!)
+    let mut tvmaze_results = search_tvmaze(&client, trimmed).await?;
+    // Prefer exact/year-matching show at index 0 when year hint is present
+    if let Some(target_year) = year {
+        if let Some(pos) = tvmaze_results.iter().position(|m| m.year == Some(target_year)) {
+            if pos > 0 {
+                let matched = tvmaze_results.remove(pos);
+                tvmaze_results.insert(0, matched);
+            }
+        }
+    }
+    Ok((MetadataProvider::Tvmaze, tvmaze_results))
+}
+
+/// Fetches official `(season, episode, title)` records for a TV show using whichever
+/// metadata service is available (TVDB v4 -> TMDB -> keyless TVMaze).
+pub async fn fetch_series_episodes(
+    title: &str,
+    ids: &ExternalIds,
+    seasons_hint: &[u32],
+    config: &MetadataProviderConfig,
+) -> Result<(MetadataProvider, Vec<EpisodeInfo>), MetadataError> {
+    let client = build_http_client()?;
+    let norm = ids.normalized();
+
+    // 1. TVDB v4 official episode list when key + tvdb_id exist
+    if let (Some(tvdb_key), Some(tvdb_id)) = (
+        config
+            .tvdb_api_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|k| !k.is_empty()),
+        norm.tvdb_id.as_deref(),
+    ) {
+        if let Ok(eps) = fetch_tvdb_episodes(&client, tvdb_id, tvdb_key).await {
+            if !eps.is_empty() {
+                return Ok((MetadataProvider::Tvdb, eps));
+            }
+        }
+    }
+
+    // 2. TMDB season episodes when key + tmdb_id exist
+    if let (Some(tmdb_key), Some(tmdb_id)) = (
+        config
+            .tmdb_api_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|k| !k.is_empty()),
+        norm.tmdb_id.as_deref(),
+    ) {
+        let target_seasons: Vec<u32> = if seasons_hint.is_empty() {
+            vec![1]
+        } else {
+            let mut dedup = seasons_hint.to_vec();
+            dedup.sort_unstable();
+            dedup.dedup();
+            dedup.into_iter().take(6).collect()
+        };
+        if let Ok(eps) = fetch_tmdb_episodes(&client, tmdb_id, &target_seasons, tmdb_key).await {
+            if !eps.is_empty() {
+                return Ok((MetadataProvider::Tmdb, eps));
+            }
+        }
+    }
+
+    // 3. Keyless TVMaze episode catalog (lookup by TVDB ID -> IMDb ID -> title search)
+    let eps = fetch_tvmaze_episodes(&client, title, &norm).await?;
+    Ok((MetadataProvider::Tvmaze, eps))
+}
+
+async fn fetch_tvdb_episodes(
+    client: &reqwest::Client,
+    tvdb_id: &str,
+    api_key: &str,
+) -> Result<Vec<EpisodeInfo>, MetadataError> {
+    let login_resp = client
+        .post("https://api4.thetvdb.com/v4/login")
+        .json(&serde_json::json!({ "apikey": api_key }))
+        .send()
+        .await
+        .map_err(|err| MetadataError::Network(err.to_string()))?;
+    if !login_resp.status().is_success() {
+        return Err(MetadataError::ProviderError(format!(
+            "TVDB login failed (HTTP {}).",
+            login_resp.status()
+        )));
+    }
+    let login_json: Value = login_resp
+        .json()
+        .await
+        .map_err(|err| MetadataError::ProviderError(err.to_string()))?;
+    let token = login_json
+        .get("data")
+        .and_then(|d| d.get("token"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| MetadataError::ProviderError("TVDB login missing token.".to_string()))?;
+
+    let mut episodes = Vec::new();
+    for page in 0..4u32 {
+        let url = format!("https://api4.thetvdb.com/v4/series/{tvdb_id}/episodes/default");
+        let resp = client
+            .get(&url)
+            .bearer_auth(token)
+            .query(&[("page", page.to_string())])
+            .send()
+            .await
+            .map_err(|err| MetadataError::Network(err.to_string()))?;
+        if !resp.status().is_success() {
+            break;
+        }
+        let json: Value = resp
+            .json()
+            .await
+            .map_err(|err| MetadataError::ProviderError(err.to_string()))?;
+        let batch = parse_tvdb_episodes_response(&json);
+        if batch.is_empty() {
+            break;
+        }
+        episodes.extend(batch);
+        let has_next = json
+            .get("links")
+            .and_then(|l| l.get("next"))
+            .and_then(Value::as_str)
+            .is_some_and(|s| !s.trim().is_empty());
+        if !has_next {
+            break;
+        }
+    }
+
+    Ok(episodes)
+}
+
+pub fn parse_tvdb_episodes_response(json: &Value) -> Vec<EpisodeInfo> {
+    let Some(items) = json
+        .get("data")
+        .and_then(|d| d.get("episodes"))
+        .and_then(Value::as_array)
+    else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|ep| {
+            let season = ep.get("seasonNumber").and_then(Value::as_u64)? as u32;
+            let number = ep.get("number").and_then(Value::as_u64)? as u32;
+            let title = ep
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())?
+                .to_string();
+            Some(EpisodeInfo {
+                season,
+                episode: number,
+                title,
+            })
+        })
+        .collect()
+}
+
+async fn fetch_tmdb_episodes(
+    client: &reqwest::Client,
+    tmdb_id: &str,
+    seasons: &[u32],
+    api_key: &str,
+) -> Result<Vec<EpisodeInfo>, MetadataError> {
+    let mut episodes = Vec::new();
+    for &season_num in seasons {
+        let url = format!("https://api.themoviedb.org/3/tv/{tmdb_id}/season/{season_num}");
+        let mut req = client.get(&url);
+        if is_tmdb_bearer_token(api_key) {
+            req = req.bearer_auth(api_key);
+        } else {
+            req = req.query(&[("api_key", api_key)]);
+        }
+        let Ok(resp) = req.send().await else {
+            continue;
+        };
+        if !resp.status().is_success() {
+            continue;
+        }
+        let Ok(json) = resp.json::<Value>().await else {
+            continue;
+        };
+        if let Some(items) = json.get("episodes").and_then(Value::as_array) {
+            for ep in items {
+                let s = ep
+                    .get("season_number")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(season_num as u64) as u32;
+                let Some(num) = ep.get("episode_number").and_then(Value::as_u64) else {
+                    continue;
+                };
+                let Some(name) = ep
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|n| !n.is_empty())
+                else {
+                    continue;
+                };
+                episodes.push(EpisodeInfo {
+                    season: s,
+                    episode: num as u32,
+                    title: name.to_string(),
+                });
+            }
+        }
+    }
+    Ok(episodes)
+}
+
+async fn fetch_tvmaze_episodes(
+    client: &reqwest::Client,
+    title: &str,
+    ids: &ExternalIds,
+) -> Result<Vec<EpisodeInfo>, MetadataError> {
+    let mut tvmaze_show_id: Option<u64> = None;
+
+    if let Some(ref tvdb_id) = ids.tvdb_id {
+        if let Ok(resp) = client
+            .get("https://api.tvmaze.com/lookup/shows")
+            .query(&[("thetvdb", tvdb_id.as_str())])
+            .send()
+            .await
+        {
+            if resp.status().is_success() {
+                if let Ok(json) = resp.json::<Value>().await {
+                    tvmaze_show_id = json.get("id").and_then(Value::as_u64);
+                }
+            }
+        }
+    }
+
+    if tvmaze_show_id.is_none() {
+        if let Some(ref imdb_id) = ids.imdb_id {
+            if let Ok(resp) = client
+                .get("https://api.tvmaze.com/lookup/shows")
+                .query(&[("imdb", imdb_id.as_str())])
+                .send()
+                .await
+            {
+                if resp.status().is_success() {
+                    if let Ok(json) = resp.json::<Value>().await {
+                        tvmaze_show_id = json.get("id").and_then(Value::as_u64);
+                    }
+                }
+            }
+        }
+    }
+
+    if tvmaze_show_id.is_none() && !title.trim().is_empty() {
+        if let Ok(resp) = client
+            .get("https://api.tvmaze.com/singlesearch/shows")
+            .query(&[("q", title.trim())])
+            .send()
+            .await
+        {
+            if resp.status().is_success() {
+                if let Ok(json) = resp.json::<Value>().await {
+                    tvmaze_show_id = json.get("id").and_then(Value::as_u64);
+                }
+            }
+        }
+    }
+
+    let Some(show_id) = tvmaze_show_id else {
+        return Ok(Vec::new());
+    };
+
+    let url = format!("https://api.tvmaze.com/shows/{show_id}/episodes");
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|err| MetadataError::Network(err.to_string()))?;
+    if !resp.status().is_success() {
+        return Err(MetadataError::ProviderError(format!(
+            "TVMaze episodes lookup failed (HTTP {}).",
+            resp.status()
+        )));
+    }
+    let json: Value = resp
+        .json()
+        .await
+        .map_err(|err| MetadataError::ProviderError(err.to_string()))?;
+    Ok(parse_tvmaze_episodes_response(&json))
+}
+
+pub fn parse_tvmaze_episodes_response(json: &Value) -> Vec<EpisodeInfo> {
+    let Some(items) = json.as_array() else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|ep| {
+            let season = ep.get("season").and_then(Value::as_u64)? as u32;
+            let number = ep.get("number").and_then(Value::as_u64)? as u32;
+            let title = ep
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())?
+                .to_string();
+            Some(EpisodeInfo {
+                season,
+                episode: number,
+                title,
+            })
+        })
+        .collect()
 }
 
 fn parse_tvmaze_response(json: &Value) -> Vec<MediaMetadata> {

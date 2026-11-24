@@ -1,16 +1,22 @@
 pub mod detect;
+pub mod folder_id;
 pub mod handbrake;
 pub mod makemkv;
 pub mod metadata;
 pub mod pipeline;
+pub mod preview;
 
 use detect::{AutoSetupResult, BinariesCheckResult, BinaryKind, BinaryPathsConfig};
-use handbrake::QualityProfile;
+use folder_id::FolderIdentifyResult;
+use handbrake::{HandBrakePreset, QualityProfile};
+use makemkv::{DiscScanResult, OpticalDrive};
 use metadata::{
-    DiscLabelGuess, ExternalIds, MediaKind, MediaMetadata, MetadataProviderConfig,
-    MetadataSearchQuery, NamingConvention,
+    DiscLabelGuess, EpisodeInfo, ExternalIds, MediaKind, MediaMetadata, MetadataProvider,
+    MetadataProviderConfig, MetadataSearchQuery, NamingConvention,
 };
-use pipeline::{PipelineController, PipelineEvent, QueueJob};
+use pipeline::{EnqueueJobRequest, PipelineController, PipelineEvent, QueueJob};
+use preview::TrickplayPreview;
+use std::path::Path;
 use tauri::ipc::Channel;
 use tauri::{Manager, RunEvent};
 
@@ -23,7 +29,7 @@ async fn check_binaries(
     Ok(detect::check_binaries(config.unwrap_or_default()).await)
 }
 
-/// Installs a single external CLI using the host OS's native package manager (`winget`/`brew`).
+/// Installs a single external CLI using the host OS's native package manager (`winget`/`brew`/`flatpak`).
 #[tauri::command]
 async fn install_binary_cli(
     kind: BinaryKind,
@@ -39,6 +45,121 @@ async fn auto_setup_dependencies(
     config: Option<BinaryPathsConfig>,
 ) -> Result<AutoSetupResult, String> {
     Ok(detect::auto_setup_missing_binaries(config.unwrap_or_default()).await)
+}
+
+/// Enumerates connected optical drives via `makemkvcon -r`.
+#[tauri::command]
+async fn scan_drives(config: Option<BinaryPathsConfig>) -> Result<Vec<OpticalDrive>, String> {
+    let detected = detect::check_binaries(config.unwrap_or_default()).await;
+    let cmd = detected.makemkv.command.filter(|_| detected.makemkv.found).ok_or_else(|| {
+        detected
+            .makemkv
+            .error
+            .unwrap_or_else(|| "makemkvcon is not installed or failed version check.".to_string())
+    })?;
+    makemkv::scan_drives(&cmd)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+/// Scans an optical disc in `drive_index` and returns its titles and video/audio/subtitle streams.
+#[tauri::command]
+async fn scan_disc(
+    drive_index: u32,
+    min_length_seconds: Option<u64>,
+    config: Option<BinaryPathsConfig>,
+) -> Result<DiscScanResult, String> {
+    let detected = detect::check_binaries(config.unwrap_or_default()).await;
+    let cmd = detected.makemkv.command.filter(|_| detected.makemkv.found).ok_or_else(|| {
+        detected
+            .makemkv
+            .error
+            .unwrap_or_else(|| "makemkvcon is not installed or failed version check.".to_string())
+    })?;
+    makemkv::scan_disc(&cmd, drive_index, min_length_seconds.unwrap_or(120))
+        .await
+        .map_err(|err| err.to_string())
+}
+
+/// Lists HandBrakeCLI built-in presets via `HandBrakeCLI --preset-list`.
+#[tauri::command]
+async fn list_handbrake_presets(
+    config: Option<BinaryPathsConfig>,
+) -> Result<Vec<HandBrakePreset>, String> {
+    let detected = detect::check_binaries(config.unwrap_or_default()).await;
+    let cmd = detected
+        .handbrake
+        .command
+        .filter(|_| detected.handbrake.found)
+        .ok_or_else(|| {
+            detected.handbrake.error.unwrap_or_else(|| {
+                "HandBrakeCLI is not installed or failed version check.".to_string()
+            })
+        })?;
+    handbrake::list_presets(&cmd)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+/// Generates a 10-second WebView-playable MP4 sample clip using the selected quality profile.
+#[tauri::command]
+async fn generate_sample_clip(
+    input_path: String,
+    temp_dir: String,
+    profile: QualityProfile,
+    start_seconds: Option<u64>,
+    config: Option<BinaryPathsConfig>,
+) -> Result<String, String> {
+    let detected = detect::check_binaries(config.unwrap_or_default()).await;
+    let cmd = detected
+        .handbrake
+        .command
+        .filter(|_| detected.handbrake.found)
+        .ok_or_else(|| {
+            detected.handbrake.error.unwrap_or_else(|| {
+                "HandBrakeCLI is not installed or failed version check.".to_string()
+            })
+        })?;
+    let sample_path = handbrake::generate_sample_clip(
+        &cmd,
+        Path::new(&input_path),
+        Path::new(&temp_dir),
+        &profile,
+        start_seconds.unwrap_or(0),
+        10,
+    )
+    .await
+    .map_err(|err| err.to_string())?;
+    Ok(sample_path.to_string_lossy().into_owned())
+}
+
+/// Automatically extracts evenly spaced trickplay still frames and probes resolution,
+/// aspect ratio, codec, and audio metadata for a selected local video file.
+#[tauri::command]
+async fn generate_trickplay_preview(
+    input_path: String,
+    temp_dir: Option<String>,
+    frame_count: Option<usize>,
+    force_regenerate: Option<bool>,
+    config: Option<BinaryPathsConfig>,
+) -> Result<TrickplayPreview, String> {
+    let resolved_temp = temp_dir
+        .filter(|s| !s.trim().is_empty() && !s.trim().eq_ignore_ascii_case("auto"))
+        .unwrap_or_else(|| detect::detect_default_paths().temp_dir);
+    let detected = detect::check_binaries(config.unwrap_or_default()).await;
+    let handbrake_cmd = detected
+        .handbrake
+        .found
+        .then_some(detected.handbrake.command)
+        .flatten();
+    preview::generate_trickplay_preview(
+        Path::new(&input_path),
+        Path::new(&resolved_temp),
+        handbrake_cmd.as_ref(),
+        frame_count,
+        force_regenerate.unwrap_or(false),
+    )
+    .await
 }
 
 /// Returns the 8 recommended Resolution (480p/720p/1080p/4K) × Delivery (Local/Remote) profiles.
@@ -96,6 +217,63 @@ async fn fetch_tmdb_external_ids(
         .map_err(|err| err.to_string())
 }
 
+/// Scans a folder of video files and automatically identifies the TV show, external IDs,
+/// season/episode numbers, and official episode titles via TVDB, TMDB, or keyless TVMaze.
+#[tauri::command]
+async fn identify_video_folder(
+    folder_path: String,
+    config: Option<MetadataProviderConfig>,
+) -> Result<FolderIdentifyResult, String> {
+    folder_id::identify_video_folder(Path::new(&folder_path), config.unwrap_or_default()).await
+}
+
+/// Identifies a TV show and official episode titles for an already-selected list of local files.
+#[tauri::command]
+async fn identify_video_files(
+    file_paths: Vec<String>,
+    config: Option<MetadataProviderConfig>,
+) -> Result<FolderIdentifyResult, String> {
+    folder_id::identify_video_file_list(&file_paths, config.unwrap_or_default()).await
+}
+
+/// Fetches the official episode catalog for a manually selected TV series so all queued rows
+/// immediately adopt canonical episode titles and uniform naming.
+#[tauri::command]
+async fn fetch_series_episodes(
+    title: String,
+    ids: ExternalIds,
+    seasons_hint: Option<Vec<u32>>,
+    config: Option<MetadataProviderConfig>,
+) -> Result<(MetadataProvider, Vec<EpisodeInfo>), String> {
+    metadata::fetch_series_episodes(
+        &title,
+        &ids,
+        seasons_hint.as_deref().unwrap_or(&[]),
+        &config.unwrap_or_default(),
+    )
+    .await
+    .map_err(|err| err.to_string())
+}
+
+/// Enqueues one or more RipOnly, EncodeOnly, or RipAndEncode jobs onto the live Tokio workers.
+#[tauri::command]
+async fn enqueue_jobs(
+    requests: Vec<EnqueueJobRequest>,
+    config: Option<BinaryPathsConfig>,
+    state: tauri::State<'_, PipelineController>,
+) -> Result<Vec<QueueJob>, String> {
+    let detected = detect::check_binaries(config.unwrap_or_default()).await;
+    let makemkv_cmd = detected.makemkv.found.then_some(detected.makemkv.command).flatten();
+    let handbrake_cmd = detected
+        .handbrake
+        .found
+        .then_some(detected.handbrake.command)
+        .flatten();
+    state
+        .enqueue_jobs(requests, makemkv_cmd, handbrake_cmd)
+        .await
+}
+
 /// Returns all jobs currently tracked by the two-stage pipeline queue.
 #[tauri::command]
 async fn get_queue(state: tauri::State<'_, PipelineController>) -> Result<Vec<QueueJob>, String> {
@@ -109,6 +287,14 @@ async fn cancel_job(
     state: tauri::State<'_, PipelineController>,
 ) -> Result<bool, String> {
     Ok(state.cancel_job(&job_id).await)
+}
+
+/// Removes completed, cancelled, and failed jobs from the queue list.
+#[tauri::command]
+async fn clear_finished_jobs(
+    state: tauri::State<'_, PipelineController>,
+) -> Result<Vec<QueueJob>, String> {
+    Ok(state.clear_finished().await)
 }
 
 /// Subscribes a Tauri v2 IPC Channel to receive real-time pipeline events.
@@ -131,18 +317,33 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_store::Builder::default().build())
         .manage(PipelineController::new())
+        .setup(|app| {
+            app.state::<PipelineController>()
+                .start_workers(app.handle().clone());
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             check_binaries,
             install_binary_cli,
             auto_setup_dependencies,
+            scan_drives,
+            scan_disc,
+            list_handbrake_presets,
+            generate_sample_clip,
+            generate_trickplay_preview,
             get_recommended_quality_profiles,
             preview_quality_cli_args,
             clean_disc_label,
             preview_output_filename,
             search_metadata,
             fetch_tmdb_external_ids,
+            identify_video_folder,
+            identify_video_files,
+            fetch_series_episodes,
+            enqueue_jobs,
             get_queue,
             cancel_job,
+            clear_finished_jobs,
             subscribe_pipeline_events
         ])
         .build(tauri::generate_context!())
