@@ -1,6 +1,6 @@
 [package]
 name = "ripdaddy"
-version = "0.1.0"
+version = "0.1.1"
 description = "Cross-platform optical disc ripping and encoding orchestrator wrapping user-installed MakeMKV and HandBrakeCLI"
 authors = ["RipDaddy Contributors"]
 license = "MIT"
