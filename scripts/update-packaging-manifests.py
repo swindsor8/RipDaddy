@@ -84,7 +84,10 @@ def compute_dir_checksums(directory: pathlib.Path, version: str) -> Dict[str, st
     for entry in sorted(directory.rglob("*")):
         if not entry.is_file():
             continue
-        if entry.name in {"SHA256SUMS.txt", "ripdaddy.rb", "RipDaddy.installer.yaml"}:
+        if (
+            entry.name in {"SHA256SUMS.txt", "ripdaddy.rb", "RipDaddy.installer.yaml", "latest.json"}
+            or entry.name.endswith(".sig")
+        ):
             continue
         all_hashes[entry.name] = sha256_file(entry)
 
@@ -139,7 +142,10 @@ def download_release_assets_via_gh(repo: str, tag: str, dest_dir: pathlib.Path) 
     dest_dir.mkdir(parents=True, exist_ok=True)
     for asset in assets:
         name = asset["name"]
-        if name in {"SHA256SUMS.txt", "ripdaddy.rb", "RipDaddy.installer.yaml"}:
+        if (
+            name in {"SHA256SUMS.txt", "ripdaddy.rb", "RipDaddy.installer.yaml", "latest.json"}
+            or name.endswith(".sig")
+        ):
             continue
         asset_id = asset["id"]
         out_path = dest_dir / name

@@ -588,6 +588,27 @@ export type PipelineEvent =
 
 export type ThemeMode = "light" | "dark" | "system";
 
+export type AppUpdateStatus =
+  | "idle"
+  | "checking"
+  | "available"
+  | "downloading"
+  | "installing"
+  | "upToDate"
+  | "error";
+
+export interface AppUpdateState {
+  status: AppUpdateStatus;
+  currentVersion: string;
+  availableVersion: string | null;
+  notes: string | null;
+  progressPercent: number;
+  downloadedBytes: number;
+  totalBytes: number | null;
+  error: string | null;
+  releaseUrl: string;
+}
+
 export type SettingsCategory =
   | "general"
   | "binaries"
@@ -599,6 +620,7 @@ export interface AppSettings {
   // General
   theme: ThemeMode;
   desktopNotifications: boolean;
+  autoCheckUpdates: boolean;
   defaultMode: WorkspaceMode;
   autoSetupOnFirstRun: boolean;
   firstRunSetupDone: boolean;

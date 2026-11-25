@@ -68,6 +68,8 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: "v__VERSION__"
           releaseName: "RipDaddy v__VERSION__"
@@ -84,6 +86,7 @@ jobs:
             > RipDaddy bundles zero third-party binaries or decryption code. If MakeMKV and HandBrake are already installed, RipDaddy detects them automatically on first launch; otherwise the First-Run Setup Wizard can install them via `winget`, `brew`, or `flatpak`.
           releaseDraft: true
           prerelease: false
+          uploadUpdaterJson: true
           args: ${{ matrix.args }}
 
   update-packaging:

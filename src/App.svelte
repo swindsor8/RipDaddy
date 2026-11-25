@@ -1,10 +1,13 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { getVersion } from "@tauri-apps/api/app";
   import { convertFileSrc, invoke } from "@tauri-apps/api/core";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import { getCurrentWebview } from "@tauri-apps/api/webview";
   import { open } from "@tauri-apps/plugin-dialog";
+  import { relaunch } from "@tauri-apps/plugin-process";
   import { Store } from "@tauri-apps/plugin-store";
+  import { check as checkAppUpdate, type Update } from "@tauri-apps/plugin-updater";
   import FirstRunSetupModal from "./lib/FirstRunSetupModal.svelte";
   import FolderOrganizeModal from "./lib/FolderOrganizeModal.svelte";
   import OrganizeReviewModal from "./lib/OrganizeReviewModal.svelte";
@@ -25,6 +28,7 @@
   } from "./lib/discTitleFilters";
   import type {
     AppSettings,
+    AppUpdateState,
     AutoSetupResult,
     BinariesCheckResult,
     BinaryInstallOutcome,
@@ -75,8 +79,10 @@
   } from "./lib/types";
 
   const SETTINGS_STORE_FILE = "settings.json";
+  const GITHUB_RELEASES_URL =
+    "https://github.com/swindsor8/RipDaddy/releases/latest";
 
-  // Binary detection, GPU probing, disk space & OS notifications state
+  // Binary detection, GPU probing, disk space, OS notifications & auto-updater state
   let binaries = $state<BinariesCheckResult | null>(null);
   let checkingBinaries = $state(false);
   let installingBinary = $state<BinaryKind | "all" | null>(null);
@@ -90,6 +96,19 @@
   let notificationTestStatus = $state<string | null>(null);
   let notificationBanner = $state<{ title: string; body: string; kind: "info" | "success" | "warn" } | null>(null);
   let systemPrefersDark = $state(false);
+  let pendingUpdateHandle: Update | null = null;
+  let updateBannerDismissed = $state(false);
+  let updateState = $state<AppUpdateState>({
+    status: "idle",
+    currentVersion: "0.1.0",
+    availableVersion: null,
+    notes: null,
+    progressPercent: 0,
+    downloadedBytes: 0,
+    totalBytes: null,
+    error: null,
+    releaseUrl: GITHUB_RELEASES_URL,
+  });
 
   // Categorized settings dropdown & first-run onboarding state
   let settingsOpen = $state(false);
@@ -99,6 +118,7 @@
   let settings = $state<AppSettings>({
     theme: "light",
     desktopNotifications: true,
+    autoCheckUpdates: true,
     defaultMode: "ripAndEncode",
     autoSetupOnFirstRun: true,
     firstRunSetupDone: false,
@@ -915,6 +935,142 @@
     }, 12000);
   }
 
+  async function handleOpenExternalUrl(url: string): Promise<void> {
+    try {
+      await invoke("open_external_url", { url });
+    } catch {
+      window.open(url, "_blank", "noopener,noreferrer");
+    }
+  }
+
+  async function handleCheckForUpdates(silent = false): Promise<void> {
+    if (
+      updateState.status === "checking" ||
+      updateState.status === "downloading" ||
+      updateState.status === "installing"
+    ) {
+      return;
+    }
+
+    if (!silent) {
+      updateState = {
+        ...updateState,
+        status: "checking",
+        error: null,
+      };
+    }
+
+    try {
+      const found = await checkAppUpdate();
+      if (pendingUpdateHandle) {
+        await pendingUpdateHandle.close().catch(() => {});
+        pendingUpdateHandle = null;
+      }
+
+      if (found) {
+        pendingUpdateHandle = found;
+        updateBannerDismissed = false;
+        updateState = {
+          ...updateState,
+          status: "available",
+          currentVersion: found.currentVersion || updateState.currentVersion,
+          availableVersion: found.version,
+          notes: found.body?.trim() || null,
+          progressPercent: 0,
+          downloadedBytes: 0,
+          totalBytes: null,
+          error: null,
+          releaseUrl: `https://github.com/swindsor8/RipDaddy/releases/tag/v${found.version}`,
+        };
+      } else if (!silent) {
+        updateState = {
+          ...updateState,
+          status: "upToDate",
+          availableVersion: null,
+          notes: null,
+          error: null,
+        };
+      }
+    } catch (err) {
+      if (!silent) {
+        const msg = err instanceof Error ? err.message : String(err);
+        updateState = {
+          ...updateState,
+          status: "error",
+          error: `Update check failed: ${msg}`,
+        };
+      }
+    }
+  }
+
+  async function handleInstallAvailableUpdate(): Promise<void> {
+    const target = pendingUpdateHandle;
+    if (
+      !target ||
+      updateState.status === "downloading" ||
+      updateState.status === "installing"
+    ) {
+      return;
+    }
+
+    let downloaded = 0;
+    let total: number | null = null;
+    updateBannerDismissed = false;
+    updateState = {
+      ...updateState,
+      status: "downloading",
+      progressPercent: 0,
+      downloadedBytes: 0,
+      totalBytes: null,
+      error: null,
+    };
+
+    try {
+      await target.downloadAndInstall((event) => {
+        if (event.event === "Started") {
+          total = event.data.contentLength ?? null;
+          downloaded = 0;
+          updateState = {
+            ...updateState,
+            status: "downloading",
+            downloadedBytes: 0,
+            totalBytes: total,
+            progressPercent: 0,
+          };
+        } else if (event.event === "Progress") {
+          downloaded += event.data.chunkLength;
+          const pct =
+            total && total > 0
+              ? Math.min(99, (downloaded / total) * 100)
+              : Math.min(95, updateState.progressPercent + 2);
+          updateState = {
+            ...updateState,
+            status: "downloading",
+            downloadedBytes: downloaded,
+            totalBytes: total,
+            progressPercent: pct,
+          };
+        } else if (event.event === "Finished") {
+          updateState = {
+            ...updateState,
+            status: "installing",
+            progressPercent: 100,
+          };
+        }
+      });
+
+      pendingUpdateHandle = null;
+      await relaunch();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      updateState = {
+        ...updateState,
+        status: "error",
+        error: `Automatic install unavailable on this package format (${msg}). Download the latest installer directly instead.`,
+      };
+    }
+  }
+
   async function readStoreValue<T>(key: string): Promise<T | null> {
     if (!settingsStore) return null;
     return (await settingsStore.get<T>(key)) ?? null;
@@ -934,6 +1090,8 @@
       }
       settings.desktopNotifications =
         (await readStoreValue<boolean>("desktopNotifications")) ?? true;
+      settings.autoCheckUpdates =
+        (await readStoreValue<boolean>("autoCheckUpdates")) ?? true;
       settings.defaultMode =
         (await readStoreValue<WorkspaceMode>("defaultMode")) ?? "ripAndEncode";
       settings.autoSetupOnFirstRun =
@@ -3215,11 +3373,24 @@
 
   async function initialize(): Promise<void> {
     await loadPersistedSettings();
+    try {
+      const ver = await getVersion();
+      if (ver) {
+        updateState = { ...updateState, currentVersion: ver };
+      }
+    } catch {
+      // Outside Tauri runtime.
+    }
+
     const [detected] = await Promise.all([
       runCheckBinaries(),
       refreshQueue(true),
       refreshDiskSpace(),
     ]);
+
+    if (settings.autoCheckUpdates) {
+      void handleCheckForUpdates(true);
+    }
 
     if (detected) {
       const bothFound = detected.makemkv.found && detected.handbrake.found;
@@ -3392,8 +3563,30 @@
       </button>
     </div>
 
-    <!-- Right: Dark Mode Toggle + Preview Toggle + Categorized Settings Dropdown -->
+    <!-- Right: Update Pill + Dark Mode Toggle + Preview Toggle + Categorized Settings Dropdown -->
     <div class="flex items-center gap-2">
+      {#if updateState.status === "available" && updateState.availableVersion}
+        <button
+          type="button"
+          onclick={() => (updateBannerDismissed = false)}
+          title={`RipDaddy v${updateState.availableVersion} is ready to install`}
+          class="flex items-center gap-1.5 rounded-full border border-[#1FA868] bg-[#4CDE99] px-2.5 py-1 text-[11px] font-bold text-[#1A1513] shadow-[0_1px_2px_rgba(0,0,0,0.08)] transition hover:brightness-95"
+        >
+          <span>↑ Update v{updateState.availableVersion}</span>
+        </button>
+      {:else if updateState.status === "downloading" || updateState.status === "installing"}
+        <span
+          class="flex items-center gap-1.5 rounded-full border border-[#1C8EC0] bg-[#E6F6FD] px-2.5 py-1 font-mono text-[10px] font-bold text-[#0E5678] dark:border-[#5BC0EB]/45 dark:bg-[#5BC0EB]/15 dark:text-[#8BD7F8]"
+        >
+          <span class="h-1.5 w-1.5 animate-pulse rounded-full bg-[#1C8EC0] dark:bg-[#5BC0EB]"></span>
+          <span>
+            {updateState.status === "installing"
+              ? "Installing update..."
+              : `Updating ${updateState.progressPercent.toFixed(0)}%`}
+          </span>
+        </span>
+      {/if}
+
       <button
         type="button"
         onclick={toggleDarkMode}
@@ -4163,6 +4356,86 @@
     <main
       class="flex min-w-0 flex-[2_1_0%] flex-col overflow-hidden bg-white dark:bg-[#1A1513]"
     >
+      {#if !updateBannerDismissed && (updateState.status === "available" || updateState.status === "downloading" || updateState.status === "installing" || (updateState.status === "error" && updateState.availableVersion))}
+        <div
+          class="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-[#9BE5C1] bg-[#E6FBF1] px-5 py-2 text-xs text-[#0E4D31] dark:border-[#4CDE99]/40 dark:bg-[#4CDE99]/14 dark:text-[#7AF0B8]"
+        >
+          <div class="flex min-w-0 flex-1 items-center gap-2.5">
+            <span class="h-2 w-2 shrink-0 rounded-full bg-[#1FA868] dark:bg-[#4CDE99]"></span>
+            {#if updateState.status === "downloading"}
+              <div class="flex min-w-0 flex-1 items-center gap-3">
+                <span class="shrink-0 font-semibold">
+                  Downloading RipDaddy v{updateState.availableVersion}...
+                </span>
+                <div class="h-1.5 max-w-xs flex-1 overflow-hidden rounded-full bg-[#1FA868]/20 dark:bg-white/15">
+                  <div
+                    class="h-full bg-[#11824F] transition-all dark:bg-[#4CDE99]"
+                    style={`width: ${Math.min(100, Math.max(0, updateState.progressPercent))}%`}
+                  ></div>
+                </div>
+                <span class="font-mono text-[11px] font-bold">
+                  {updateState.progressPercent.toFixed(0)}%
+                </span>
+              </div>
+            {:else if updateState.status === "installing"}
+              <span class="font-semibold">
+                Installing RipDaddy v{updateState.availableVersion} — relaunching shortly...
+              </span>
+            {:else if updateState.status === "error"}
+              <span class="truncate font-medium text-[#751A2E] dark:text-[#FF99AA]">
+                {updateState.error}
+              </span>
+            {:else}
+              <span class="truncate">
+                <strong>RipDaddy v{updateState.availableVersion}</strong> is available
+                (you have v{updateState.currentVersion}).
+              </span>
+            {/if}
+          </div>
+
+          <div class="flex shrink-0 items-center gap-2">
+            {#if updateState.status === "available"}
+              <button
+                type="button"
+                onclick={() => void handleInstallAvailableUpdate()}
+                class="rounded-md bg-[#11824F] px-3 py-1 text-[11px] font-semibold text-white transition hover:bg-[#0D6E42]"
+              >
+                Update &amp; Restart
+              </button>
+              <button
+                type="button"
+                onclick={() => void handleOpenExternalUrl(updateState.releaseUrl)}
+                class="rounded border border-[#1FA868]/40 bg-white/80 px-2 py-1 text-[11px] font-semibold text-[#0E4D31] hover:bg-white dark:border-[#4CDE99]/35 dark:bg-[#1A1513] dark:text-[#7AF0B8] dark:hover:bg-[#221C19]"
+              >
+                Release Notes ↗
+              </button>
+              <button
+                type="button"
+                onclick={() => (updateBannerDismissed = true)}
+                class="text-[11px] font-semibold opacity-80 hover:opacity-100"
+              >
+                Later
+              </button>
+            {:else if updateState.status === "error"}
+              <button
+                type="button"
+                onclick={() => void handleOpenExternalUrl(updateState.releaseUrl)}
+                class="rounded-md bg-[#11824F] px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-[#0D6E42]"
+              >
+                Download Release ↗
+              </button>
+              <button
+                type="button"
+                onclick={() => (updateBannerDismissed = true)}
+                class="text-[11px] font-semibold opacity-80 hover:opacity-100"
+              >
+                Dismiss
+              </button>
+            {/if}
+          </div>
+        </div>
+      {/if}
+
       {#if queueActionError}
         <div
           class="flex shrink-0 items-center justify-between gap-3 border-b border-red-200 bg-red-50 px-5 py-2 text-xs text-red-700 dark:border-red-500/40 dark:bg-red-500/15 dark:text-red-300"
@@ -5045,6 +5318,7 @@
     {loadingDiskSpace}
     {testingNotification}
     {notificationTestStatus}
+    {updateState}
     {settings}
     onClose={() => (settingsOpen = false)}
     onSelectCategory={(cat) => {
@@ -5063,6 +5337,9 @@
     onProbeEncoders={() => void runProbeEncoders()}
     onRefreshDiskSpace={() => void refreshDiskSpace()}
     onTestNotification={() => void handleTestNotification()}
+    onCheckForUpdates={() => void handleCheckForUpdates(false)}
+    onInstallUpdate={() => void handleInstallAvailableUpdate()}
+    onOpenExternalUrl={(url) => void handleOpenExternalUrl(url)}
     onAutoSetupAll={() => void runAutoSetupAll()}
     onInstallSingle={(kind) => void runInstallSingle(kind)}
     onBrowseBinary={(target) => void browseBinary(target)}

@@ -559,6 +559,45 @@ fn reveal_in_file_manager(path: String) -> Result<(), String> {
     }
 }
 
+/// Opens an HTTPS URL in the user's default system browser (e.g. GitHub Releases fallback).
+#[tauri::command]
+fn open_external_url(url: String) -> Result<(), String> {
+    let trimmed = url.trim();
+    if !trimmed.starts_with("https://") && !trimmed.starts_with("http://") {
+        return Err("Only http:// or https:// URLs can be opened.".to_string());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(trimmed)
+            .spawn()
+            .map_err(|err| format!("Failed opening browser: {err}"))?;
+        return Ok(());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "", trimmed])
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .map_err(|err| format!("Failed opening browser: {err}"))?;
+        return Ok(());
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(trimmed)
+            .spawn()
+            .map_err(|err| format!("Failed opening browser: {err}"))?;
+        Ok(())
+    }
+}
+
 /// Removes completed, cancelled, and failed jobs from the queue list.
 #[tauri::command]
 async fn clear_finished_jobs(
@@ -583,9 +622,15 @@ async fn subscribe_pipeline_events(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let app = tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_store::Builder::default().build())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_store::Builder::default().build());
+
+    #[cfg(desktop)]
+    let builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
+
+    let app = builder
         .manage(PipelineController::new())
         .manage(OrganizeUndoStore::new())
         .setup(|app| {
@@ -631,6 +676,7 @@ pub fn run() {
             retry_job,
             clear_finished_jobs,
             reveal_in_file_manager,
+            open_external_url,
             subscribe_pipeline_events
         ])
         .build(tauri::generate_context!())

@@ -15,6 +15,7 @@
   } from "./qualityDefaults";
   import type {
     AppSettings,
+    AppUpdateState,
     BinariesCheckResult,
     BinaryInstallOutcome,
     BinaryKind,
@@ -47,6 +48,7 @@
     loadingDiskSpace: boolean;
     testingNotification: boolean;
     notificationTestStatus: string | null;
+    updateState: AppUpdateState;
     settings: AppSettings;
     onClose: () => void;
     onSelectCategory: (category: SettingsCategory) => void;
@@ -61,6 +63,9 @@
     onProbeEncoders: () => void;
     onRefreshDiskSpace: () => void;
     onTestNotification: () => void;
+    onCheckForUpdates: () => void;
+    onInstallUpdate: () => void;
+    onOpenExternalUrl: (url: string) => void;
     onAutoSetupAll: () => void;
     onInstallSingle: (kind: BinaryKind) => void;
     onBrowseBinary: (target: "makemkv" | "handbrake") => void;
@@ -84,6 +89,7 @@
     loadingDiskSpace,
     testingNotification,
     notificationTestStatus,
+    updateState,
     settings,
     onClose,
     onSelectCategory,
@@ -95,6 +101,9 @@
     onProbeEncoders,
     onRefreshDiskSpace,
     onTestNotification,
+    onCheckForUpdates,
+    onInstallUpdate,
+    onOpenExternalUrl,
     onAutoSetupAll,
     onInstallSingle,
     onBrowseBinary,
@@ -683,6 +692,123 @@
                     onchange={(e) =>
                       onUpdateSetting("autoEjectDisc", e.currentTarget.checked)}
                     class="mt-0.5 h-4 w-4 accent-[#11824F] dark:accent-[#4CDE99]"
+                  />
+                </label>
+              </div>
+
+              <!-- App Updates Card -->
+              <div
+                class="space-y-2.5 rounded-xl border border-[#E6E0D6] bg-[#F7F4EE] p-3.5 dark:border-[#332925] dark:bg-[#221C19]"
+              >
+                <div class="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <div class="flex items-center gap-2">
+                      <span class="text-xs font-semibold text-[#1A1513] dark:text-[#F5EFE8]">
+                        App Updates
+                      </span>
+                      <span
+                        class="rounded-full border border-[#DAD3C7] bg-white px-2 py-0.5 font-mono text-[10px] font-semibold text-[#544943] dark:border-[#3A2F2A] dark:bg-[#1A1513] dark:text-[#CFC5BB]"
+                      >
+                        v{updateState.currentVersion}
+                      </span>
+                      {#if updateState.status === "available" && updateState.availableVersion}
+                        <span
+                          class="rounded-full border border-[#1FA868] bg-[#4CDE99] px-2 py-0.5 font-mono text-[10px] font-bold text-[#1A1513]"
+                        >
+                          v{updateState.availableVersion} ready
+                        </span>
+                      {:else if updateState.status === "upToDate"}
+                        <span
+                          class="rounded-full border border-[#9BE5C1] bg-[#E6FBF1] px-2 py-0.5 font-mono text-[10px] font-semibold text-[#0E4D31] dark:border-[#4CDE99]/40 dark:bg-[#4CDE99]/15 dark:text-[#7AF0B8]"
+                        >
+                          Up to date ✓
+                        </span>
+                      {/if}
+                    </div>
+                    <p class="mt-0.5 text-[11px] text-[#70645D] dark:text-[#A69990]">
+                      One-click signed updates from GitHub Releases (Windows, macOS, Linux AppImage).
+                    </p>
+                  </div>
+
+                  <div class="flex items-center gap-1.5">
+                    {#if updateState.status === "available" && updateState.availableVersion}
+                      <button
+                        type="button"
+                        onclick={onInstallUpdate}
+                        class="rounded-md bg-[#11824F] px-2.5 py-1 text-[11px] font-semibold text-white transition hover:bg-[#0D6E42]"
+                      >
+                        Update to v{updateState.availableVersion} &amp; Restart
+                      </button>
+                    {:else}
+                      <button
+                        type="button"
+                        onclick={onCheckForUpdates}
+                        disabled={updateState.status === "checking" ||
+                          updateState.status === "downloading" ||
+                          updateState.status === "installing"}
+                        class="rounded-md border border-[#DAD3C7] bg-white px-2.5 py-1 text-[11px] font-semibold text-[#1A1513] transition hover:bg-[#EDE7DD] disabled:opacity-50 dark:border-[#3A2F2A] dark:bg-[#1A1513] dark:text-[#F5EFE8] dark:hover:bg-[#2E2622]"
+                      >
+                        {updateState.status === "checking"
+                          ? "Checking..."
+                          : updateState.status === "downloading"
+                            ? `Downloading ${updateState.progressPercent.toFixed(0)}%...`
+                            : updateState.status === "installing"
+                              ? "Installing..."
+                              : "Check for Updates"}
+                      </button>
+                    {/if}
+                  </div>
+                </div>
+
+                {#if updateState.status === "downloading" || updateState.status === "installing"}
+                  <div class="space-y-1">
+                    <div class="h-1.5 w-full overflow-hidden rounded-full bg-[#E6E0D6] dark:bg-[#332925]">
+                      <div
+                        class="h-full bg-[#4CDE99] transition-all"
+                        style={`width: ${Math.min(100, Math.max(0, updateState.progressPercent))}%`}
+                      ></div>
+                    </div>
+                    <div class="flex items-center justify-between font-mono text-[10px] text-[#7D716A] dark:text-[#9E9187]">
+                      <span>
+                        {updateState.status === "installing"
+                          ? "Verifying signature & installing update..."
+                          : `Downloading v${updateState.availableVersion ?? ""}...`}
+                      </span>
+                      <span>{updateState.progressPercent.toFixed(0)}%</span>
+                    </div>
+                  </div>
+                {:else if updateState.status === "error" && updateState.error}
+                  <div
+                    class="flex flex-wrap items-center justify-between gap-2 rounded-md border border-[#E8BF6E] bg-[#FFF7E6] px-2.5 py-1.5 text-[10px] text-[#5E3906] dark:border-[#F8B142]/45 dark:bg-[#F8B142]/15 dark:text-[#FCD283]"
+                  >
+                    <span class="min-w-0 flex-1 break-words">{updateState.error}</span>
+                    <button
+                      type="button"
+                      onclick={() => onOpenExternalUrl(updateState.releaseUrl)}
+                      class="shrink-0 rounded border border-current/30 bg-white/70 px-2 py-0.5 font-semibold hover:bg-white dark:bg-black/25 dark:hover:bg-black/40"
+                    >
+                      Download Release ↗
+                    </button>
+                  </div>
+                {/if}
+
+                <label
+                  for="setting-auto-check-updates"
+                  class="flex cursor-pointer items-center justify-between gap-3 border-t border-[#E6E0D6] pt-2.5 text-[11px] dark:border-[#332925]"
+                >
+                  <span class="font-medium text-[#544943] dark:text-[#CFC5BB]">
+                    Automatically check for updates on launch
+                  </span>
+                  <input
+                    id="setting-auto-check-updates"
+                    type="checkbox"
+                    checked={settings.autoCheckUpdates}
+                    onchange={(e) =>
+                      onUpdateSetting(
+                        "autoCheckUpdates",
+                        e.currentTarget.checked,
+                      )}
+                    class="h-3.5 w-3.5 accent-[#11824F] dark:accent-[#4CDE99]"
                   />
                 </label>
               </div>
