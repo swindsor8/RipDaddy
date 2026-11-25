@@ -163,6 +163,23 @@ jobs:
           upload_asset "packaging/homebrew/ripdaddy.rb"
           upload_asset "packaging/winget/RipDaddy.installer.yaml"
 
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.checksums.outputs.tag }}"
+          RELEASE_ID="$(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=30" \
+            --jq ".[] | select(.tag_name == \"${TAG}\") | .id" | head -n 1)"
+          if [[ -z "${RELEASE_ID}" ]]; then
+            echo "::error::Could not find release for tag ${TAG}"
+            exit 1
+          fi
+          gh api -X PATCH "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" \
+            -F draft=false \
+            -f make_latest=true >/dev/null
+          echo "Published RipDaddy ${TAG} as the latest public GitHub Release."
+
       - name: Commit populated manifests back to main
         run: |
           set -euo pipefail
