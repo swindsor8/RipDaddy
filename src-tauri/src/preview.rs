@@ -91,16 +91,6 @@ pub struct TrickplayPreview {
     pub note: Option<String>,
 }
 
-#[cfg(windows)]
-fn configure_platform_command(cmd: &mut Command) {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    cmd.creation_flags(CREATE_NO_WINDOW);
-}
-
-#[cfg(not(windows))]
-fn configure_platform_command(_cmd: &mut Command) {}
-
 /// Formats a timestamp in seconds as `H:MM:SS` (or `M:SS` when under 1 hour).
 pub fn format_timestamp(seconds: f64) -> String {
     let total = seconds.max(0.0).round() as u64;
@@ -447,7 +437,7 @@ async fn probe_with_ffprobe(ffprobe: &ResolvedCommand, input_path: &Path) -> Opt
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .kill_on_drop(true);
-    configure_platform_command(&mut cmd);
+    crate::system::configure_external_command(&mut cmd);
 
     let child = cmd.spawn().ok()?;
     let output = timeout(PROBE_TIMEOUT, child.wait_with_output())
@@ -509,7 +499,7 @@ pub async fn probe_video_quick_info(
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .kill_on_drop(true);
-    configure_platform_command(&mut cmd);
+    crate::system::configure_external_command(&mut cmd);
 
     let Ok(child) = cmd.spawn() else {
         return QuickContainerProbe::default();
@@ -595,7 +585,7 @@ async fn probe_with_handbrake(
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .kill_on_drop(true);
-    configure_platform_command(&mut cmd);
+    crate::system::configure_external_command(&mut cmd);
 
     let child = cmd.spawn().ok()?;
     let output = timeout(PROBE_TIMEOUT, child.wait_with_output())
@@ -659,7 +649,7 @@ async fn extract_frame_direct_ffmpeg(
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    configure_platform_command(&mut cmd);
+    crate::system::configure_external_command(&mut cmd);
 
     let child = cmd
         .spawn()
@@ -742,7 +732,7 @@ async fn extract_frame_via_handbrake_bridge(
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    configure_platform_command(&mut hb_cmd);
+    crate::system::configure_external_command(&mut hb_cmd);
 
     let hb_child = hb_cmd
         .spawn()
@@ -788,7 +778,7 @@ async fn extract_frame_via_handbrake_bridge(
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    configure_platform_command(&mut ff_cmd);
+    crate::system::configure_external_command(&mut ff_cmd);
 
     let ff_res = match ff_cmd.spawn() {
         Ok(child) => match timeout(FRAME_EXTRACT_TIMEOUT, child.wait_with_output()).await {

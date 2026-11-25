@@ -534,25 +534,26 @@ fn reveal_in_file_manager(path: String) -> Result<(), String> {
         if target.is_file() {
             if let Ok(canon) = std::fs::canonicalize(target) {
                 let uri = format!("file://{}", canon.to_string_lossy());
-                if std::process::Command::new("dbus-send")
-                    .args([
-                        "--session",
-                        "--dest=org.freedesktop.FileManager1",
-                        "--type=method_call",
-                        "/org/freedesktop/FileManager1",
-                        "org.freedesktop.FileManager1.ShowItems",
-                        &format!("array:string:{uri}"),
-                        "string:",
-                    ])
-                    .status()
-                    .is_ok_and(|s| s.success())
-                {
+                let mut dbus_cmd = std::process::Command::new("dbus-send");
+                dbus_cmd.args([
+                    "--session",
+                    "--dest=org.freedesktop.FileManager1",
+                    "--type=method_call",
+                    "/org/freedesktop/FileManager1",
+                    "org.freedesktop.FileManager1.ShowItems",
+                    &format!("array:string:{uri}"),
+                    "string:",
+                ]);
+                system::configure_external_std_command(&mut dbus_cmd);
+                if dbus_cmd.status().is_ok_and(|s| s.success()) {
                     return Ok(());
                 }
             }
         }
-        std::process::Command::new("xdg-open")
-            .arg(&dir_fallback)
+        let mut open_cmd = std::process::Command::new("xdg-open");
+        open_cmd.arg(&dir_fallback);
+        system::configure_external_std_command(&mut open_cmd);
+        open_cmd
             .spawn()
             .map_err(|err| format!("Failed opening file manager: {err}"))?;
         Ok(())
@@ -590,9 +591,10 @@ fn open_external_url(url: String) -> Result<(), String> {
 
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        std::process::Command::new("xdg-open")
-            .arg(trimmed)
-            .spawn()
+        let mut cmd = std::process::Command::new("xdg-open");
+        cmd.arg(trimmed);
+        system::configure_external_std_command(&mut cmd);
+        cmd.spawn()
             .map_err(|err| format!("Failed opening browser: {err}"))?;
         Ok(())
     }

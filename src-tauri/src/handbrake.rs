@@ -867,16 +867,6 @@ pub fn build_encode_args(
     args
 }
 
-#[cfg(windows)]
-fn configure_platform_command(cmd: &mut Command) {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    cmd.creation_flags(CREATE_NO_WINDOW);
-}
-
-#[cfg(not(windows))]
-fn configure_platform_command(_cmd: &mut Command) {}
-
 /// Lists built-in HandBrake presets via `HandBrakeCLI --preset-list`.
 pub async fn list_presets(resolved: &ResolvedCommand) -> Result<Vec<HandBrakePreset>, HandBrakeError> {
     let mut cmd = Command::new(&resolved.program);
@@ -886,7 +876,7 @@ pub async fn list_presets(resolved: &ResolvedCommand) -> Result<Vec<HandBrakePre
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    configure_platform_command(&mut cmd);
+    crate::system::configure_external_command(&mut cmd);
 
     let child = cmd
         .spawn()
@@ -1067,6 +1057,7 @@ async fn probe_linux_vainfo_hevc_encode() -> Option<bool> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    crate::system::configure_external_command(&mut cmd);
     let child = cmd.spawn().ok()?;
     let out = timeout(VAINFO_PROBE_TIMEOUT, child.wait_with_output())
         .await
@@ -1305,7 +1296,7 @@ pub async fn probe_encoders(
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        configure_platform_command(&mut cmd);
+        crate::system::configure_external_command(&mut cmd);
 
         let child = cmd.spawn().ok()?;
         let output = timeout(ENCODER_PROBE_TIMEOUT, child.wait_with_output())
@@ -1408,7 +1399,7 @@ pub async fn generate_sample_clip(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    configure_platform_command(&mut cmd);
+    crate::system::configure_external_command(&mut cmd);
 
     let child = cmd
         .spawn()

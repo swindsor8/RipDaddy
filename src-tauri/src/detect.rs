@@ -570,7 +570,7 @@ pub async fn install_binary_via_package_manager(kind: BinaryKind) -> Result<Stri
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    configure_platform_command(&mut cmd);
+    crate::system::configure_external_command(&mut cmd);
 
     let child = cmd
         .spawn()
@@ -1141,16 +1141,6 @@ fn is_executable_file(path: &Path) -> bool {
     }
 }
 
-#[cfg(windows)]
-fn configure_platform_command(cmd: &mut Command) {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    cmd.creation_flags(CREATE_NO_WINDOW);
-}
-
-#[cfg(not(windows))]
-fn configure_platform_command(_cmd: &mut Command) {}
-
 /// Executes a bounded, non-invasive version check against the resolved command.
 async fn probe_version(kind: BinaryKind, resolved: &ResolvedCommand) -> Result<String, String> {
     let mut cmd = Command::new(&resolved.program);
@@ -1168,7 +1158,7 @@ async fn probe_version(kind: BinaryKind, resolved: &ResolvedCommand) -> Result<S
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    configure_platform_command(&mut cmd);
+    crate::system::configure_external_command(&mut cmd);
 
     let child = cmd.spawn().map_err(|err| {
         format!(

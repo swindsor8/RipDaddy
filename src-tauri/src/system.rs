@@ -54,11 +54,226 @@ pub struct StorageSpaceReport {
     pub same_volume: bool,
 }
 
-#[cfg(windows)]
-fn configure_platform_command(cmd: &mut Command) {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    cmd.creation_flags(CREATE_NO_WINDOW);
+#[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
+const APPIMAGE_DROP_VARS: &[&str] = &["APPDIR", "APPIMAGE", "ARGV0", "OWD"];
+
+#[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
+const APPIMAGE_PATH_LIST_VARS: &[&str] = &[
+    "LD_LIBRARY_PATH",
+    "LD_PRELOAD",
+    "PATH",
+    "XDG_DATA_DIRS",
+    "XDG_CONFIG_DIRS",
+    "GIO_EXTRA_MODULES",
+    "GTK_PATH",
+    "GST_PLUGIN_PATH",
+    "GST_PLUGIN_SYSTEM_PATH",
+    "GST_PLUGIN_SYSTEM_PATH_1_0",
+    "QT_PLUGIN_PATH",
+    "QML2_IMPORT_PATH",
+    "LIBVA_DRIVERS_PATH",
+    "LIBGL_DRIVERS_PATH",
+    "GCONV_PATH",
+    "PYTHONPATH",
+];
+
+#[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
+fn is_appimage_path_entry(entry: &str, appdirs: &[String]) -> bool {
+    let trimmed = entry.trim_end_matches('/');
+    if trimmed.is_empty() {
+        return false;
+    }
+    if trimmed.contains("/.mount_") {
+        return true;
+    }
+    appdirs.iter().any(|dir| {
+        trimmed == dir.as_str()
+            || (trimmed.len() > dir.len()
+                && trimmed.starts_with(dir.as_str())
+                && trimmed.as_bytes()[dir.len()] == b'/')
+    })
+}
+
+/// Computes environment variable updates needed so host CLI binaries spawned from a Linux
+/// AppImage (e.g. `flatpak`, `makemkvcon`, `HandBrakeCLI`, `notify-send`, `xdg-open`, `vainfo`)
+/// do not inherit the AppImage's bundled Ubuntu libraries (`LD_LIBRARY_PATH`, GIO/GTK/GSettings
+/// paths, etc.) and crash with GLib/GTK symbol lookup errors on newer host distros.
+///
+/// Returns `(key, None)` to remove a variable or `(key, Some(cleaned))` to replace it.
+/// Returns an empty list when not running inside an AppImage.
+#[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
+pub fn compute_appimage_env_sanitization<I>(vars: I) -> Vec<(String, Option<String>)>
+where
+    I: IntoIterator<Item = (String, String)>,
+{
+    let env_list: Vec<(String, String)> = vars.into_iter().collect();
+
+    let mut appdirs: Vec<String> = Vec::new();
+    let mut has_appimage = false;
+    for (k, v) in &env_list {
+        if k == "APPDIR" {
+            let norm = v.trim().trim_end_matches('/').to_string();
+            if !norm.is_empty() {
+                has_appimage = true;
+                if let Ok(canon) = std::fs::canonicalize(&norm) {
+                    let canon_str = canon.to_string_lossy().trim_end_matches('/').to_string();
+                    if !canon_str.is_empty() && canon_str != norm && !appdirs.contains(&canon_str) {
+                        appdirs.push(canon_str);
+                    }
+                }
+                if !appdirs.contains(&norm) {
+                    appdirs.push(norm);
+                }
+            }
+        } else if k == "APPIMAGE" && !v.trim().is_empty() {
+            has_appimage = true;
+        } else if k == "LD_LIBRARY_PATH" && v.contains("/.mount_") {
+            has_appimage = true;
+        }
+    }
+
+    if !has_appimage {
+        return Vec::new();
+    }
+
+    let mut ops: Vec<(String, Option<String>)> = Vec::new();
+    for (key, val) in env_list {
+        if matches!(key.as_str(), "PWD" | "OLDPWD" | "_") {
+            continue;
+        }
+
+        if APPIMAGE_DROP_VARS.contains(&key.as_str()) {
+            ops.push((key, None));
+            continue;
+        }
+
+        if key == "LD_PRELOAD" {
+            let mut had_appimage = false;
+            let kept: Vec<&str> = val
+                .split(|c: char| c == ':' || c.is_ascii_whitespace())
+                .filter(|seg| {
+                    if seg.is_empty() {
+                        return false;
+                    }
+                    if is_appimage_path_entry(seg, &appdirs) {
+                        had_appimage = true;
+                        false
+                    } else {
+                        true
+                    }
+                })
+                .collect();
+            if had_appimage {
+                if kept.is_empty() {
+                    ops.push((key, None));
+                } else {
+                    ops.push((key, Some(kept.join(":"))));
+                }
+            }
+            continue;
+        }
+
+        let is_known_list = APPIMAGE_PATH_LIST_VARS.contains(&key.as_str());
+        if is_known_list || val.contains(':') {
+            let mut had_appimage = false;
+            let kept: Vec<&str> = val
+                .split(':')
+                .filter(|seg| {
+                    if seg.is_empty() {
+                        return false;
+                    }
+                    if is_appimage_path_entry(seg, &appdirs) {
+                        had_appimage = true;
+                        false
+                    } else {
+                        true
+                    }
+                })
+                .collect();
+            if had_appimage {
+                if kept.is_empty() {
+                    ops.push((key, None));
+                } else {
+                    ops.push((key, Some(kept.join(":"))));
+                }
+            }
+            continue;
+        }
+
+        if is_appimage_path_entry(&val, &appdirs) {
+            ops.push((key, None));
+        }
+    }
+
+    ops
+}
+
+/// Applies platform-specific configuration to an external `tokio::process::Command`:
+/// - Windows: hides console window flash (`CREATE_NO_WINDOW`).
+/// - Linux: strips AppImage-injected library & runtime env vars (`LD_LIBRARY_PATH`, GIO/GTK
+///   paths, etc.) so host system binaries run against the host's own shared libraries.
+pub fn configure_external_command(cmd: &mut Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let vars = std::env::vars_os().filter_map(|(k, v)| {
+            Some((k.into_string().ok()?, v.into_string().ok()?))
+        });
+        for (key, value) in compute_appimage_env_sanitization(vars) {
+            match value {
+                Some(cleaned) => {
+                    cmd.env(key, cleaned);
+                }
+                None => {
+                    cmd.env_remove(key);
+                }
+            }
+        }
+    }
+
+    #[cfg(not(any(windows, target_os = "linux")))]
+    {
+        let _ = cmd;
+    }
+}
+
+/// Applies platform-specific configuration to an external `std::process::Command`
+/// (Linux AppImage env sanitization; Windows `CREATE_NO_WINDOW`).
+pub fn configure_external_std_command(cmd: &mut std::process::Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let vars = std::env::vars_os().filter_map(|(k, v)| {
+            Some((k.into_string().ok()?, v.into_string().ok()?))
+        });
+        for (key, value) in compute_appimage_env_sanitization(vars) {
+            match value {
+                Some(cleaned) => {
+                    cmd.env(key, cleaned);
+                }
+                None => {
+                    cmd.env_remove(key);
+                }
+            }
+        }
+    }
+
+    #[cfg(not(any(windows, target_os = "linux")))]
+    {
+        let _ = cmd;
+    }
 }
 
 /// Classifies free disk space severity for Blu-ray / DVD ripping & encoding workloads.
@@ -232,6 +447,7 @@ async fn query_disk_space_unix(original_path: &str, existing: &Path) -> Option<D
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .kill_on_drop(true);
+    configure_external_command(&mut cmd);
 
     let child = cmd.spawn().ok()?;
     let output = timeout(DISK_SPACE_TIMEOUT, child.wait_with_output())
@@ -371,6 +587,7 @@ pub async fn send_desktop_notification(title: &str, body: &str) -> Result<(), St
                 .stdout(Stdio::null())
                 .stderr(Stdio::piped())
                 .kill_on_drop(true);
+            configure_external_command(&mut cmd);
 
             if let Ok(child) = cmd.spawn() {
                 if let Ok(Ok(out)) = timeout(NOTIFICATION_TIMEOUT, child.wait_with_output()).await {
@@ -403,6 +620,7 @@ pub async fn send_desktop_notification(title: &str, body: &str) -> Result<(), St
                 .stdout(Stdio::null())
                 .stderr(Stdio::piped())
                 .kill_on_drop(true);
+            configure_external_command(&mut cmd);
 
             let child = cmd
                 .spawn()
@@ -495,7 +713,7 @@ try {
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        configure_platform_command(&mut cmd);
+        configure_external_command(&mut cmd);
 
         let child = cmd
             .spawn()
@@ -577,6 +795,90 @@ tmpfs /mnt/ram\\040disk tmpfs rw 0 0
         assert_eq!(
             classify_disk_severity(200 * 1024 * 1024 * 1024, true),
             DiskSpaceSeverity::Critical
+        );
+    }
+
+    #[test]
+    fn sanitizes_appimage_env_without_affecting_normal_host_runs() {
+        // Non-AppImage environments remain completely untouched.
+        let normal_env = vec![
+            ("LD_LIBRARY_PATH".to_string(), "/opt/custom/lib".to_string()),
+            ("PATH".to_string(), "/usr/local/bin:/usr/bin".to_string()),
+            ("HOME".to_string(), "/home/seth".to_string()),
+        ];
+        assert!(compute_appimage_env_sanitization(normal_env).is_empty());
+
+        // AppImage runtime env strips bundled Ubuntu libs & GTK/GIO vars while preserving user paths.
+        let appdir = "/tmp/.mount_RipDadABC123";
+        let appimage_env = vec![
+            ("APPDIR".to_string(), appdir.to_string()),
+            (
+                "APPIMAGE".to_string(),
+                "/home/seth/Downloads/RipDaddy_0.1.1_amd64.AppImage".to_string(),
+            ),
+            (
+                "LD_LIBRARY_PATH".to_string(),
+                format!("{appdir}/usr/lib:{appdir}/usr/lib/x86_64-linux-gnu:"),
+            ),
+            (
+                "PATH".to_string(),
+                format!("{appdir}/usr/bin:/usr/local/bin:/usr/bin"),
+            ),
+            (
+                "XDG_DATA_DIRS".to_string(),
+                format!("{appdir}/usr/share:/usr/local/share:/usr/share"),
+            ),
+            (
+                "GIO_MODULE_DIR".to_string(),
+                format!("{appdir}/usr/lib/gio/modules"),
+            ),
+            (
+                "GSETTINGS_SCHEMA_DIR".to_string(),
+                format!("{appdir}/usr/share/glib-2.0/schemas"),
+            ),
+            (
+                "GDK_PIXBUF_MODULE_FILE".to_string(),
+                format!("{appdir}/usr/lib/gdk-pixbuf-2.0/2.10.0/loaders.cache"),
+            ),
+            ("HOME".to_string(), "/home/seth".to_string()),
+        ];
+
+        let ops: std::collections::HashMap<String, Option<String>> =
+            compute_appimage_env_sanitization(appimage_env)
+                .into_iter()
+                .collect();
+
+        assert_eq!(ops.get("APPDIR"), Some(&None));
+        assert_eq!(ops.get("APPIMAGE"), Some(&None));
+        assert_eq!(ops.get("LD_LIBRARY_PATH"), Some(&None));
+        assert_eq!(
+            ops.get("PATH"),
+            Some(&Some("/usr/local/bin:/usr/bin".to_string()))
+        );
+        assert_eq!(
+            ops.get("XDG_DATA_DIRS"),
+            Some(&Some("/usr/local/share:/usr/share".to_string()))
+        );
+        assert_eq!(ops.get("GIO_MODULE_DIR"), Some(&None));
+        assert_eq!(ops.get("GSETTINGS_SCHEMA_DIR"), Some(&None));
+        assert_eq!(ops.get("GDK_PIXBUF_MODULE_FILE"), Some(&None));
+        assert!(!ops.contains_key("HOME"));
+
+        // Preserves user-supplied LD_LIBRARY_PATH segments outside the AppImage.
+        let mixed_ld = vec![
+            ("APPDIR".to_string(), appdir.to_string()),
+            (
+                "LD_LIBRARY_PATH".to_string(),
+                format!("{appdir}/usr/lib:/opt/cuda/lib64"),
+            ),
+        ];
+        let mixed_ops: std::collections::HashMap<String, Option<String>> =
+            compute_appimage_env_sanitization(mixed_ld)
+                .into_iter()
+                .collect();
+        assert_eq!(
+            mixed_ops.get("LD_LIBRARY_PATH"),
+            Some(&Some("/opt/cuda/lib64".to_string()))
         );
     }
 }

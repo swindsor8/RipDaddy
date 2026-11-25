@@ -452,43 +452,34 @@ impl Drop for RegistryGuard {
 }
 
 #[cfg(windows)]
-fn configure_platform_command(cmd: &mut Command) {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    cmd.creation_flags(CREATE_NO_WINDOW);
-}
-
-#[cfg(not(windows))]
-fn configure_platform_command(_cmd: &mut Command) {}
-
-#[cfg(windows)]
 fn terminate_pid_sync(pid: u32) {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    let _ = std::process::Command::new("taskkill")
-        .args(["/PID", &pid.to_string(), "/T", "/F"])
+    let mut cmd = std::process::Command::new("taskkill");
+    cmd.args(["/PID", &pid.to_string(), "/T", "/F"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .creation_flags(CREATE_NO_WINDOW)
-        .status();
+        .stderr(Stdio::null());
+    crate::system::configure_external_std_command(&mut cmd);
+    let _ = cmd.status();
 }
 
 #[cfg(unix)]
 fn terminate_pid_sync(pid: u32) {
     let pid_str = pid.to_string();
-    let _ = std::process::Command::new("kill")
-        .args(["-TERM", &pid_str])
+    let mut term = std::process::Command::new("kill");
+    term.args(["-TERM", &pid_str])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-    let _ = std::process::Command::new("kill")
-        .args(["-KILL", &pid_str])
+        .stderr(Stdio::null());
+    crate::system::configure_external_std_command(&mut term);
+    let _ = term.status();
+
+    let mut kill = std::process::Command::new("kill");
+    kill.args(["-KILL", &pid_str])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+        .stderr(Stdio::null());
+    crate::system::configure_external_std_command(&mut kill);
+    let _ = kill.status();
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -523,7 +514,7 @@ where
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    configure_platform_command(&mut cmd);
+    crate::system::configure_external_command(&mut cmd);
 
     let mut child = cmd
         .spawn()

@@ -560,16 +560,6 @@ pub fn build_rip_title_args(drive_index: u32, title_id: u32, output_dir: &Path) 
     ]
 }
 
-#[cfg(windows)]
-fn configure_platform_command(cmd: &mut Command) {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    cmd.creation_flags(CREATE_NO_WINDOW);
-}
-
-#[cfg(not(windows))]
-fn configure_platform_command(_cmd: &mut Command) {}
-
 /// Enumerates connected optical drives via `makemkvcon -r`.
 pub async fn scan_drives(resolved: &ResolvedCommand) -> Result<Vec<OpticalDrive>, MakeMkvError> {
     let mut cmd = Command::new(&resolved.program);
@@ -579,7 +569,7 @@ pub async fn scan_drives(resolved: &ResolvedCommand) -> Result<Vec<OpticalDrive>
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    configure_platform_command(&mut cmd);
+    crate::system::configure_external_command(&mut cmd);
 
     let child = cmd
         .spawn()
@@ -617,7 +607,7 @@ pub async fn scan_disc(
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .kill_on_drop(true);
-    configure_platform_command(&mut cmd);
+    crate::system::configure_external_command(&mut cmd);
 
     let mut child = cmd
         .spawn()
@@ -681,13 +671,12 @@ pub async fn eject_optical_drive(device_path: Option<&str>) {
         if let Some(dev) = device_path.filter(|s| !s.trim().is_empty()) {
             cmd.arg(dev);
         }
-        let _ = cmd
-            .stdin(Stdio::null())
+        cmd.stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .kill_on_drop(true)
-            .status()
-            .await;
+            .kill_on_drop(true);
+        crate::system::configure_external_command(&mut cmd);
+        let _ = cmd.status().await;
     }
 
     #[cfg(target_os = "macos")]
@@ -716,7 +705,7 @@ pub async fn eject_optical_drive(device_path: Option<&str>) {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .kill_on_drop(true);
-        configure_platform_command(&mut cmd);
+        crate::system::configure_external_command(&mut cmd);
         let _ = cmd.status().await;
     }
 
