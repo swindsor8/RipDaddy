@@ -4,7 +4,7 @@
 # InstallerSha256 is auto-populated by `.github/workflows/release.yml` when tagging `v*`
 # (or locally via `python3 scripts/update-packaging-manifests.py --from-release`).
 PackageIdentifier: swindsor8.RipDaddy
-PackageVersion: 0.1.0
+PackageVersion: 0.1.1
 InstallerLocale: en-US
 InstallerType: nullsoft
 Scope: user
@@ -14,7 +14,7 @@ Dependencies:
     - PackageIdentifier: GuinpinSoft.MakeMKV
 Installers:
   - Architecture: x64
-    InstallerUrl: https://github.com/swindsor8/RipDaddy/releases/download/v0.1.0/RipDaddy_0.1.0_x64-setup.exe
-    InstallerSha256: 95A74290076B6E12B83772645E0F89E65332E0034A81059B9093ED8E570F9632
+    InstallerUrl: https://github.com/swindsor8/RipDaddy/releases/download/v0.1.1/RipDaddy_0.1.1_x64-setup.exe
+    InstallerSha256: C60E598A2589991681B82B4712221A6A38DDADC2C9FC27652A36A5F468AD5229
 ManifestType: installer
 ManifestVersion: 1.6.0
