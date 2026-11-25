@@ -6,6 +6,7 @@
     shortEncoderLabel,
     shortResolutionLabel,
   } from "./qualityDefaults";
+  import type { DuplicateDurationGroup } from "./discTitleFilters";
   import type {
     DiscTitle,
     NamingConvention,
@@ -20,6 +21,7 @@
   interface Props {
     workflowMode: WorkspaceMode;
     selectedTitle: DiscTitle | null;
+    selectedTitleDuplicateGroup?: DuplicateDurationGroup | null;
     selectedLocalFile: string | null;
     outputFilenamePreview: string;
     namingConvention: NamingConvention;
@@ -42,6 +44,7 @@
   let {
     workflowMode,
     selectedTitle,
+    selectedTitleDuplicateGroup = null,
     selectedLocalFile,
     outputFilenamePreview,
     namingConvention,
@@ -174,13 +177,13 @@
   function trackBadgeClass(track: StreamTrack): string {
     switch (track.trackType) {
       case "video":
-        return "border-[#9CD9F5] bg-[#E6F6FD] text-[#0E5678]";
+        return "border-[#9CD9F5] bg-[#E6F6FD] text-[#0E5678] dark:border-[#5BC0EB]/40 dark:bg-[#5BC0EB]/15 dark:text-[#8BD7F8]";
       case "audio":
-        return "border-[#9BE5C1] bg-[#E6FBF1] text-[#0E4D31]";
+        return "border-[#9BE5C1] bg-[#E6FBF1] text-[#0E4D31] dark:border-[#4CDE99]/40 dark:bg-[#4CDE99]/15 dark:text-[#7AF0B8]";
       case "subtitle":
-        return "border-[#F0CB82] bg-[#FDF3DC] text-[#563406]";
+        return "border-[#F0CB82] bg-[#FDF3DC] text-[#563406] dark:border-[#F8B142]/40 dark:bg-[#F8B142]/15 dark:text-[#FCD283]";
       case "unknown":
-        return "border-[#E6E0D6] bg-[#FAF8F4] text-[#61554F]";
+        return "border-[#E6E0D6] bg-[#FAF8F4] text-[#61554F] dark:border-[#3A2F2A] dark:bg-[#221C19] dark:text-[#B8ABA0]";
     }
   }
 
@@ -197,18 +200,18 @@
 
 <aside
   aria-label="Preview and inspector"
-  class="flex min-w-0 flex-[1_1_0%] flex-col border-l border-[#E6E0D6] bg-white"
+  class="flex min-w-0 flex-[1_1_0%] flex-col border-l border-[#E6E0D6] bg-white dark:border-[#332925] dark:bg-[#1A1513]"
 >
   <!-- Drawer Header -->
   <header
-    class="flex items-center justify-between border-b border-[#EDE7DE] px-4 py-2.5"
+    class="flex items-center justify-between border-b border-[#EDE7DE] px-4 py-2.5 dark:border-[#2B221E]"
   >
     <div class="flex items-center gap-2">
-      <h2 class="text-xs font-bold tracking-[-0.01em] text-[#1A1513]">
+      <h2 class="text-xs font-bold tracking-[-0.01em] text-[#1A1513] dark:text-[#F5EFE8]">
         Preview
       </h2>
       <span
-        class="rounded-full border border-[#E6E0D6] bg-[#FAF8F4] px-2 py-0.5 font-mono text-[10px] font-semibold text-[#61554F]"
+        class="rounded-full border border-[#E6E0D6] bg-[#FAF8F4] px-2 py-0.5 font-mono text-[10px] font-semibold text-[#61554F] dark:border-[#3A2F2A] dark:bg-[#221C19] dark:text-[#CFC5BB]"
       >
         {#if isLocalMode}
           {#if loadingTrickplay}
@@ -230,7 +233,7 @@
           type="button"
           onclick={() => (lightboxOpen = true)}
           title="Open fullscreen frame inspector"
-          class="rounded border border-[#E6E0D6] bg-[#FAF8F4] px-2 py-0.5 text-[10px] font-semibold text-[#1A1513] transition hover:bg-[#EDE7DD]"
+          class="rounded border border-[#E6E0D6] bg-[#FAF8F4] px-2 py-0.5 text-[10px] font-semibold text-[#1A1513] transition hover:bg-[#EDE7DD] dark:border-[#3A2F2A] dark:bg-[#221C19] dark:text-[#F5EFE8] dark:hover:bg-[#2E2622]"
         >
           ⤢ Fullscreen
         </button>
@@ -239,7 +242,7 @@
         type="button"
         onclick={onClose}
         aria-label="Close preview panel"
-        class="rounded px-1.5 py-0.5 text-xs font-medium text-[#7D716A] transition hover:bg-[#FAF8F4] hover:text-[#1A1513]"
+        class="rounded px-1.5 py-0.5 text-xs font-medium text-[#7D716A] transition hover:bg-[#FAF8F4] hover:text-[#1A1513] dark:text-[#9E9187] dark:hover:bg-[#221C19] dark:hover:text-[#F5EFE8]"
       >
         ✕
       </button>
@@ -249,7 +252,7 @@
   <div class="flex-1 space-y-3.5 overflow-y-auto p-4">
     <!-- 16:9 Trickplay Frame Stage -->
     <div
-      class="group relative aspect-video w-full overflow-hidden rounded-lg border border-[#DAD3C7] bg-[#181311]"
+      class="group relative aspect-video w-full overflow-hidden rounded-lg border border-[#DAD3C7] bg-[#120E0D] dark:border-[#3A2F2A]"
     >
       {#if isLocalMode && selectedLocalFile}
         {#if loadingTrickplay}
@@ -363,6 +366,11 @@
           <p class="max-w-full truncate text-xs font-semibold text-white">
             {selectedTitle.name ?? `Title #${selectedTitle.titleId}`}
           </p>
+          {#if selectedTitle.sourceFileName}
+            <p class="mt-0.5 font-mono text-[10px] text-[#4CDE99]">
+              Playlist: {selectedTitle.sourceFileName}
+            </p>
+          {/if}
           <p class="mt-1 text-[11px] leading-relaxed text-[#A89C95]">
             Pre-rip optical disc metadata. Trickplay frames unlock automatically
             for local video files.
@@ -426,7 +434,7 @@
       <div class="space-y-2">
         {#if frames.length > 1}
           <div class="flex items-center gap-2">
-            <span class="font-mono text-[10px] text-[#7D716A]">
+            <span class="font-mono text-[10px] text-[#7D716A] dark:text-[#9E9187]">
               {frames[0].timestampLabel}
             </span>
             <label for="trickplay-scrubber" class="sr-only">
@@ -440,9 +448,9 @@
               step={1}
               value={activeFrameIndex}
               oninput={handleScrubInput}
-              class="h-1.5 flex-1 cursor-pointer accent-[#11824F]"
+              class="h-1.5 flex-1 cursor-pointer accent-[#11824F] dark:accent-[#4CDE99]"
             />
-            <span class="font-mono text-[10px] text-[#7D716A]">
+            <span class="font-mono text-[10px] text-[#7D716A] dark:text-[#9E9187]">
               {frames[frames.length - 1].timestampLabel}
             </span>
           </div>
@@ -458,10 +466,10 @@
                 lightboxOpen = true;
               }}
               title={`Jump to ${frame.timestampLabel} (double-click for fullscreen)`}
-              class={`relative overflow-hidden rounded border bg-[#181311] transition ${
+              class={`relative overflow-hidden rounded border bg-[#120E0D] transition ${
                 idx === activeFrameIndex
-                  ? "border-[#11824F] ring-2 ring-[#11824F]/35"
-                  : "border-[#DAD3C7] opacity-80 hover:border-[#1A1513] hover:opacity-100"
+                  ? "border-[#11824F] ring-2 ring-[#11824F]/35 dark:border-[#4CDE99] dark:ring-[#4CDE99]/35"
+                  : "border-[#DAD3C7] opacity-80 hover:border-[#1A1513] hover:opacity-100 dark:border-[#3A2F2A] dark:hover:border-[#F5EFE8]"
               }`}
             >
               <img
@@ -483,12 +491,12 @@
     <!-- Source Video Quality & Aspect Ratio Specs (Encode / Organize) -->
     {#if isLocalMode && selectedLocalFile && trickplay}
       <div
-        class="divide-y divide-[#EDE7DD] overflow-hidden rounded-lg border border-[#E6E0D6] text-xs"
+        class="divide-y divide-[#EDE7DD] overflow-hidden rounded-lg border border-[#E6E0D6] text-xs dark:divide-[#2B221E] dark:border-[#332925]"
       >
         <div class="grid grid-cols-12 px-3 py-1.5">
-          <span class="col-span-4 font-medium text-[#7D716A]">File</span>
+          <span class="col-span-4 font-medium text-[#7D716A] dark:text-[#9E9187]">File</span>
           <span
-            class="col-span-8 truncate font-semibold text-[#1A1513]"
+            class="col-span-8 truncate font-semibold text-[#1A1513] dark:text-[#F5EFE8]"
             title={selectedLocalFile}
           >
             {fileBaseName(selectedLocalFile)}
@@ -496,12 +504,12 @@
         </div>
 
         <div class="grid grid-cols-12 px-3 py-1.5">
-          <span class="col-span-4 font-medium text-[#7D716A]">Resolution</span>
-          <span class="col-span-8 font-mono text-[11px] font-semibold text-[#1A1513]">
+          <span class="col-span-4 font-medium text-[#7D716A] dark:text-[#9E9187]">Resolution</span>
+          <span class="col-span-8 font-mono text-[11px] font-semibold text-[#1A1513] dark:text-[#F5EFE8]">
             {#if trickplay.mediaInfo.width && trickplay.mediaInfo.height}
               {trickplay.mediaInfo.width}×{trickplay.mediaInfo.height}
               {#if trickplay.mediaInfo.displayWidth && trickplay.mediaInfo.displayWidth !== trickplay.mediaInfo.width}
-                <span class="text-[#7D716A]">
+                <span class="text-[#7D716A] dark:text-[#9E9187]">
                   → {trickplay.mediaInfo.displayWidth}×{trickplay.mediaInfo.displayHeight}
                 </span>
               {/if}
@@ -512,11 +520,11 @@
         </div>
 
         <div class="grid grid-cols-12 px-3 py-1.5">
-          <span class="col-span-4 font-medium text-[#7D716A]">Aspect Ratio</span>
-          <span class="col-span-8 font-mono text-[11px] text-[#1A1513]">
+          <span class="col-span-4 font-medium text-[#7D716A] dark:text-[#9E9187]">Aspect Ratio</span>
+          <span class="col-span-8 font-mono text-[11px] text-[#1A1513] dark:text-[#F5EFE8]">
             {trickplay.mediaInfo.displayAspectRatio ?? "--"}
             {#if trickplay.mediaInfo.sampleAspectRatio && trickplay.mediaInfo.sampleAspectRatio !== "1:1"}
-              <span class="text-[#7D716A]">
+              <span class="text-[#7D716A] dark:text-[#9E9187]">
                 (SAR {trickplay.mediaInfo.sampleAspectRatio})
               </span>
             {/if}
@@ -524,8 +532,8 @@
         </div>
 
         <div class="grid grid-cols-12 px-3 py-1.5">
-          <span class="col-span-4 font-medium text-[#7D716A]">Video</span>
-          <span class="col-span-8 truncate font-mono text-[11px] text-[#1A1513]">
+          <span class="col-span-4 font-medium text-[#7D716A] dark:text-[#9E9187]">Video</span>
+          <span class="col-span-8 truncate font-mono text-[11px] text-[#1A1513] dark:text-[#F5EFE8]">
             {trickplay.mediaInfo.videoCodec ?? "--"}
             {#if trickplay.mediaInfo.fps}
               · {trickplay.mediaInfo.fps.toFixed(2)} fps
@@ -534,8 +542,8 @@
         </div>
 
         <div class="grid grid-cols-12 px-3 py-1.5">
-          <span class="col-span-4 font-medium text-[#7D716A]">Duration</span>
-          <span class="col-span-8 font-mono text-[11px] text-[#1A1513]">
+          <span class="col-span-4 font-medium text-[#7D716A] dark:text-[#9E9187]">Duration</span>
+          <span class="col-span-8 font-mono text-[11px] text-[#1A1513] dark:text-[#F5EFE8]">
             {formatDuration(trickplay.mediaInfo.durationSeconds)}
             {#if trickplay.mediaInfo.bitrateKbps}
               · {formatBitrate(trickplay.mediaInfo.bitrateKbps)}
@@ -548,8 +556,8 @@
 
         {#if trickplay.mediaInfo.audioSummary}
           <div class="grid grid-cols-12 px-3 py-1.5">
-            <span class="col-span-4 font-medium text-[#7D716A]">Audio / Sub</span>
-            <span class="col-span-8 truncate font-mono text-[11px] text-[#1A1513]">
+            <span class="col-span-4 font-medium text-[#7D716A] dark:text-[#9E9187]">Audio / Sub</span>
+            <span class="col-span-8 truncate font-mono text-[11px] text-[#1A1513] dark:text-[#F5EFE8]">
               {trickplay.mediaInfo.audioSummary}
               {#if trickplay.mediaInfo.subtitleCount > 0}
                 · {trickplay.mediaInfo.subtitleCount} sub{trickplay.mediaInfo.subtitleCount === 1 ? "" : "s"}
@@ -561,15 +569,17 @@
     {/if}
 
     <!-- Output Target Card -->
-    <div class="space-y-1.5 rounded-lg border border-[#E6E0D6] bg-[#F7F4EE] p-3">
+    <div
+      class="space-y-1.5 rounded-lg border border-[#E6E0D6] bg-[#F7F4EE] p-3 dark:border-[#332925] dark:bg-[#221C19]"
+    >
       <div class="flex items-center justify-between">
         <span
-          class="text-[10px] font-bold uppercase tracking-[0.08em] text-[#7D716A]"
+          class="text-[10px] font-bold uppercase tracking-[0.08em] text-[#7D716A] dark:text-[#9E9187]"
         >
           Target Output ({namingConvention})
         </span>
         <span
-          class="rounded border border-[#E6E0D6] bg-white px-1.5 py-0.5 font-mono text-[10px] font-semibold text-[#1A1513]"
+          class="rounded border border-[#E6E0D6] bg-white px-1.5 py-0.5 font-mono text-[10px] font-semibold text-[#1A1513] dark:border-[#3A2F2A] dark:bg-[#1A1513] dark:text-[#F5EFE8]"
         >
           .{workflowMode === "ripOnly"
             ? "mkv"
@@ -579,7 +589,7 @@
         </span>
       </div>
       <p
-        class="break-all font-mono text-[11px] leading-relaxed text-[#1A1513]"
+        class="break-all font-mono text-[11px] leading-relaxed text-[#1A1513] dark:text-[#F5EFE8]"
         title={outputFilenamePreview}
       >
         {outputFilenamePreview}
@@ -589,7 +599,7 @@
     <!-- Active Quality Profile Summary -->
     {#if workflowMode !== "ripOnly" && workflowMode !== "organizeOnly" && activeQualityProfile}
       <div
-        class="space-y-1.5 rounded-lg border border-[#E6E0D6] bg-[#F7F4EE] p-3"
+        class="space-y-1.5 rounded-lg border border-[#E6E0D6] bg-[#F7F4EE] p-3 dark:border-[#332925] dark:bg-[#221C19]"
       >
         <div class="flex items-center justify-between gap-2">
           <div class="flex items-center gap-1.5">
@@ -602,21 +612,21 @@
             >
               {activeQualityProfile.delivery}
             </span>
-            <span class="font-mono text-xs font-bold text-[#1A1513]">
+            <span class="font-mono text-xs font-bold text-[#1A1513] dark:text-[#F5EFE8]">
               {shortResolutionLabel(activeQualityProfile.resolution)}
             </span>
           </div>
           <button
             type="button"
             onclick={onEditQuality}
-            class="text-[11px] font-semibold text-[#11824F] hover:underline"
+            class="text-[11px] font-semibold text-[#11824F] hover:underline dark:text-[#4CDE99]"
           >
             Tune Quality
           </button>
         </div>
 
         <div
-          class="flex flex-wrap items-center gap-1.5 font-mono text-[10px] text-[#544943]"
+          class="flex flex-wrap items-center gap-1.5 font-mono text-[10px] text-[#544943] dark:text-[#CFC5BB]"
         >
           <span>{shortEncoderLabel(activeQualityProfile.encoder)}</span>
           <span>·</span>
@@ -628,7 +638,7 @@
         </div>
 
         {#if scalingNote}
-          <p class="font-mono text-[10px] font-medium text-[#0E5678]">
+          <p class="font-mono text-[10px] font-medium text-[#0E5678] dark:text-[#8BD7F8]">
             {scalingNote}
           </p>
         {/if}
@@ -637,30 +647,48 @@
 
     <!-- Disc Title Specs (Rip Only / Rip + Encode) -->
     {#if !isLocalMode && selectedTitle}
+      {#if selectedTitleDuplicateGroup}
+        <div
+          class="rounded-lg border border-[#E8BF6E] bg-[#FFF7E6] px-3 py-2 text-[11px] leading-snug text-[#5E3906] dark:border-[#F8B142]/40 dark:bg-[#F8B142]/15 dark:text-[#FCD283]"
+        >
+          <span class="font-bold">⚠ Duplicate Duration (×{selectedTitleDuplicateGroup.count}):</span>
+          Shares runtime with {selectedTitleDuplicateGroup.count - 1} other title{selectedTitleDuplicateGroup.count - 1 === 1 ? "" : "s"}.
+          Check the playlist file ({selectedTitle.sourceFileName ?? "unknown"}) before ripping obfuscated Blu-rays.
+        </div>
+      {/if}
+
       <div
-        class="divide-y divide-[#EDE7DD] overflow-hidden rounded-lg border border-[#E6E0D6] text-xs"
+        class="divide-y divide-[#EDE7DD] overflow-hidden rounded-lg border border-[#E6E0D6] text-xs dark:divide-[#2B221E] dark:border-[#332925]"
       >
         <div class="grid grid-cols-12 px-3 py-2">
-          <span class="col-span-4 font-medium text-[#7D716A]">Title ID</span>
-          <span class="col-span-8 font-mono font-semibold text-[#1A1513]">
+          <span class="col-span-4 font-medium text-[#7D716A] dark:text-[#9E9187]">Title ID</span>
+          <span class="col-span-8 font-mono font-semibold text-[#1A1513] dark:text-[#F5EFE8]">
             #{selectedTitle.titleId}
           </span>
         </div>
+        {#if selectedTitle.sourceFileName}
+          <div class="grid grid-cols-12 px-3 py-2">
+            <span class="col-span-4 font-medium text-[#7D716A] dark:text-[#9E9187]">Playlist</span>
+            <span class="col-span-8 truncate font-mono text-[#1A1513] dark:text-[#F5EFE8]">
+              {selectedTitle.sourceFileName}
+            </span>
+          </div>
+        {/if}
         <div class="grid grid-cols-12 px-3 py-2">
-          <span class="col-span-4 font-medium text-[#7D716A]">Duration</span>
-          <span class="col-span-8 font-mono text-[#1A1513]">
+          <span class="col-span-4 font-medium text-[#7D716A] dark:text-[#9E9187]">Duration</span>
+          <span class="col-span-8 font-mono text-[#1A1513] dark:text-[#F5EFE8]">
             {selectedTitle.duration ?? "--:--:--"}
           </span>
         </div>
         <div class="grid grid-cols-12 px-3 py-2">
-          <span class="col-span-4 font-medium text-[#7D716A]">Size</span>
-          <span class="col-span-8 font-mono text-[#1A1513]">
+          <span class="col-span-4 font-medium text-[#7D716A] dark:text-[#9E9187]">Size</span>
+          <span class="col-span-8 font-mono text-[#1A1513] dark:text-[#F5EFE8]">
             {selectedTitle.sizeHuman ?? "--"}
           </span>
         </div>
         <div class="grid grid-cols-12 px-3 py-2">
-          <span class="col-span-4 font-medium text-[#7D716A]">Chapters</span>
-          <span class="col-span-8 font-mono text-[#1A1513]">
+          <span class="col-span-4 font-medium text-[#7D716A] dark:text-[#9E9187]">Chapters</span>
+          <span class="col-span-8 font-mono text-[#1A1513] dark:text-[#F5EFE8]">
             {selectedTitle.chapterCount ?? "--"}
           </span>
         </div>
@@ -670,18 +698,18 @@
       <div class="space-y-2">
         <div class="flex items-center justify-between gap-2">
           <span
-            class="text-[10px] font-bold uppercase tracking-[0.08em] text-[#7D716A]"
+            class="text-[10px] font-bold uppercase tracking-[0.08em] text-[#7D716A] dark:text-[#9E9187]"
           >
             Streams ({selectedTitle.streams.length})
           </span>
           {#if onToggleTrack && selectedTitle.streams.some((t) => t.trackType === "audio" || t.trackType === "subtitle")}
-            <span class="text-[10px] text-[#7D716A]">
+            <span class="text-[10px] text-[#7D716A] dark:text-[#9E9187]">
               Click audio/subs to toggle
             </span>
           {/if}
         </div>
         {#if selectedTitle.streams.length === 0}
-          <p class="text-[11px] text-[#7D716A]">No streams reported.</p>
+          <p class="text-[11px] text-[#7D716A] dark:text-[#9E9187]">No streams reported.</p>
         {:else}
           <div class="flex flex-wrap gap-1.5">
             {#each selectedTitle.streams as track (track.streamId)}
@@ -699,7 +727,7 @@
                     : `Included ${track.trackType} track — click to exclude from encode`}
                   class={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-semibold transition ${
                     excluded
-                      ? "border-dashed border-[#D6CFC3] bg-[#FAF8F4] text-[#9E928B] line-through opacity-75 hover:border-[#1A1513] hover:text-[#1A1513]"
+                      ? "border-dashed border-[#D6CFC3] bg-[#FAF8F4] text-[#9E928B] line-through opacity-75 hover:border-[#1A1513] hover:text-[#1A1513] dark:border-[#443731] dark:bg-[#221C19] dark:text-[#8E8178] dark:hover:border-[#F5EFE8] dark:hover:text-[#F5EFE8]"
                       : `${trackBadgeClass(track)} hover:brightness-95`
                   }`}
                 >
@@ -723,13 +751,13 @@
   <!-- Clean Trickplay Footer (Encode / Organize) -->
   {#if isLocalMode && selectedLocalFile}
     <footer
-      class="flex items-center gap-2 border-t border-[#EDE7DE] bg-[#F7F4EE] p-3"
+      class="flex items-center gap-2 border-t border-[#EDE7DE] bg-[#F7F4EE] p-3 dark:border-[#2B221E] dark:bg-[#120E0D]"
     >
       <button
         type="button"
         onclick={onRegenerateFrames}
         disabled={loadingTrickplay}
-        class="rounded-md border border-[#DAD3C7] bg-white px-2.5 py-1.5 text-[11px] font-semibold text-[#1A1513] transition hover:bg-[#EDE7DD] disabled:opacity-50"
+        class="rounded-md border border-[#DAD3C7] bg-white px-2.5 py-1.5 text-[11px] font-semibold text-[#1A1513] transition hover:bg-[#EDE7DD] disabled:opacity-50 dark:border-[#3A2F2A] dark:bg-[#221C19] dark:text-[#F5EFE8] dark:hover:bg-[#2E2622]"
       >
         {loadingTrickplay ? "Extracting..." : "Refresh Frames"}
       </button>
@@ -738,7 +766,7 @@
         type="button"
         onclick={() => (lightboxOpen = true)}
         disabled={!activeFrame || loadingTrickplay}
-        class="flex-1 rounded-md bg-[#1A1513] px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-[#332925] disabled:cursor-not-allowed disabled:bg-[#C6BEB1] disabled:text-[#70645D]"
+        class="flex-1 rounded-md bg-[#1A1513] px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-[#332925] disabled:cursor-not-allowed disabled:bg-[#C6BEB1] disabled:text-[#70645D] dark:bg-[#4CDE99] dark:text-[#120E0D] dark:hover:brightness-95 dark:disabled:bg-[#2C2420] dark:disabled:text-[#6E6058]"
       >
         ⤢ Inspect Fullscreen
       </button>

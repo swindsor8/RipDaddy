@@ -207,6 +207,46 @@ export interface EncodeProgress {
   passCount: number | null;
 }
 
+export interface EncoderProbeInfo {
+  encoder: VideoEncoder;
+  cliName: string;
+  isHardware: boolean;
+  supported: boolean;
+  cliListed: boolean;
+  hardwareDetected: boolean;
+  reason: string;
+}
+
+export interface EncoderCapabilities {
+  handbrakeAvailable: boolean;
+  handbrakeVersion: string | null;
+  encoders: EncoderProbeInfo[];
+  recommendedGpuEncoder: VideoEncoder | null;
+  summary: string;
+}
+
+// ---------------------------------------------------------------------------
+// Free Disk Space & OS Notifications (src-tauri/src/system.rs)
+// ---------------------------------------------------------------------------
+
+export type DiskSpaceSeverity = "ok" | "low" | "critical";
+
+export interface DiskSpaceInfo {
+  path: string;
+  resolvedMount: string;
+  availableBytes: number;
+  totalBytes: number;
+  usedBytes: number;
+  isTmpfs: boolean;
+  severity: DiskSpaceSeverity;
+}
+
+export interface StorageSpaceReport {
+  temp: DiskSpaceInfo | null;
+  output: DiskSpaceInfo | null;
+  sameVolume: boolean;
+}
+
 // ---------------------------------------------------------------------------
 // Auto-Generated Trickplay Preview Frames & Media Info (src-tauri/src/preview.rs)
 // ---------------------------------------------------------------------------
@@ -490,6 +530,14 @@ export interface QueueJob {
   error: string | null;
 }
 
+export type ReorderAction = "top" | "up" | "down" | "bottom";
+
+export interface QueueStateSnapshot {
+  jobs: QueueJob[];
+  paused: boolean;
+  restoredPendingCount: number;
+}
+
 export interface EnqueueJobRequest {
   mode: PipelineMode;
   discName: string;
@@ -505,6 +553,7 @@ export interface EnqueueJobRequest {
   outputDir: string;
   keepTempMkv: boolean;
   autoEjectDisc: boolean;
+  notifyOnComplete?: boolean;
   namingConvention: NamingConvention;
   folderOrganization: FolderOrganization | null;
   mediaMetadata: MediaMetadata | null;
@@ -513,6 +562,7 @@ export interface EnqueueJobRequest {
 
 export type PipelineEvent =
   | { type: "jobUpdated"; job: QueueJob }
+  | { type: "queueSnapshot"; jobs: QueueJob[]; paused: boolean }
   | { type: "progress"; jobId: string; progress: JobProgress }
   | { type: "stageChanged"; jobId: string; from: JobStage; to: JobStage }
   | {
@@ -522,11 +572,21 @@ export type PipelineEvent =
       stream: string;
       line: string;
     }
-  | { type: "tempCleaned"; jobId: string; removedPath: string };
+  | { type: "tempCleaned"; jobId: string; removedPath: string }
+  | { type: "discEjected"; jobId: string; discName: string }
+  | {
+      type: "batchCompleted";
+      completed: number;
+      failed: number;
+      title: string;
+      body: string;
+    };
 
 // ---------------------------------------------------------------------------
 // Persistent Local Settings (tauri-plugin-store)
 // ---------------------------------------------------------------------------
+
+export type ThemeMode = "light" | "dark" | "system";
 
 export type SettingsCategory =
   | "general"
@@ -537,6 +597,8 @@ export type SettingsCategory =
 
 export interface AppSettings {
   // General
+  theme: ThemeMode;
+  desktopNotifications: boolean;
   defaultMode: WorkspaceMode;
   autoSetupOnFirstRun: boolean;
   firstRunSetupDone: boolean;

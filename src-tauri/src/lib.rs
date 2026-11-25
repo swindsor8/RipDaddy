@@ -6,10 +6,11 @@ pub mod metadata;
 pub mod organize;
 pub mod pipeline;
 pub mod preview;
+pub mod system;
 
 use detect::{AutoSetupResult, BinariesCheckResult, BinaryKind, BinaryPathsConfig};
 use folder_id::{FolderIdentifyResult, IdentifiedVideoFile};
-use handbrake::{HandBrakePreset, QualityProfile, TrackSelectionOptions};
+use handbrake::{EncoderCapabilities, HandBrakePreset, QualityProfile, TrackSelectionOptions};
 use makemkv::{DiscScanResult, OpticalDrive};
 use metadata::{
     DiscLabelGuess, EpisodeInfo, ExternalIds, FolderOrganization, MediaKind, MediaMetadata,
@@ -19,8 +20,12 @@ use organize::{
     OrganizeExecutionResult, OrganizePlan, OrganizePlanRequest, OrganizeUndoStore,
     UndoOrganizeResult,
 };
-use pipeline::{EnqueueJobRequest, PipelineController, PipelineEvent, QueueJob};
+use pipeline::{
+    EnqueueJobRequest, PipelineController, PipelineEvent, QueueJob, QueueStateSnapshot,
+    ReorderAction,
+};
 use preview::TrickplayPreview;
+use system::StorageSpaceReport;
 use std::path::Path;
 use tauri::ipc::Channel;
 use tauri::{Manager, RunEvent};
@@ -104,6 +109,36 @@ async fn list_handbrake_presets(
     handbrake::list_presets(&cmd)
         .await
         .map_err(|err| err.to_string())
+}
+
+/// Probes `HandBrakeCLI --help` and local GPU hardware to detect supported CPU and GPU encoders
+/// (`nvenc_h265`, `vaapi_h265`, `qsv_h265`, `vt_h265`).
+#[tauri::command]
+async fn probe_video_encoders(
+    config: Option<BinaryPathsConfig>,
+) -> Result<EncoderCapabilities, String> {
+    let detected = detect::check_binaries(config.unwrap_or_default()).await;
+    let cmd = detected
+        .handbrake
+        .found
+        .then_some(detected.handbrake.command)
+        .flatten();
+    Ok(handbrake::probe_encoders(cmd.as_ref(), detected.handbrake.version).await)
+}
+
+/// Inspects free and total disk space for the configured Temp staging and Output library volumes.
+#[tauri::command]
+async fn get_disk_space(
+    temp_dir: Option<String>,
+    output_dir: Option<String>,
+) -> Result<StorageSpaceReport, String> {
+    Ok(system::inspect_storage_space(temp_dir.as_deref(), output_dir.as_deref()).await)
+}
+
+/// Sends a native OS desktop notification (used for testing notifications in Settings).
+#[tauri::command]
+async fn send_os_notification(title: String, body: String) -> Result<(), String> {
+    system::send_desktop_notification(&title, &body).await
 }
 
 /// Generates a 10-second WebView-playable MP4 sample clip using the selected quality profile.
@@ -352,6 +387,76 @@ async fn get_queue(state: tauri::State<'_, PipelineController>) -> Result<Vec<Qu
     Ok(state.list_jobs().await)
 }
 
+/// Returns the complete queue snapshot including paused & restored-session status.
+#[tauri::command]
+async fn get_queue_state(
+    state: tauri::State<'_, PipelineController>,
+) -> Result<QueueStateSnapshot, String> {
+    Ok(state.queue_state().await)
+}
+
+/// Moves a pending job to the top, up, down, or bottom of the queue.
+#[tauri::command]
+async fn move_queue_job(
+    job_id: String,
+    action: ReorderAction,
+    state: tauri::State<'_, PipelineController>,
+) -> Result<Vec<QueueJob>, String> {
+    state.move_job(&job_id, action).await
+}
+
+/// Reorders a pending job directly to a target index (e.g. via drag-and-drop).
+#[tauri::command]
+async fn reorder_queue_job(
+    job_id: String,
+    target_index: usize,
+    state: tauri::State<'_, PipelineController>,
+) -> Result<Vec<QueueJob>, String> {
+    state.reorder_job_to_index(&job_id, target_index).await
+}
+
+/// Removes a single queued or finished job from the queue and persisted `queue.json`.
+#[tauri::command]
+async fn remove_queue_job(
+    job_id: String,
+    state: tauri::State<'_, PipelineController>,
+) -> Result<Vec<QueueJob>, String> {
+    state.remove_job(&job_id).await
+}
+
+/// Pauses or resumes queue dispatch (refreshing external CLI paths on resume).
+#[tauri::command]
+async fn set_queue_paused(
+    paused: bool,
+    config: Option<BinaryPathsConfig>,
+    state: tauri::State<'_, PipelineController>,
+) -> Result<QueueStateSnapshot, String> {
+    let (makemkv_cmd, handbrake_cmd) = if paused {
+        (None, None)
+    } else {
+        let detected = detect::check_binaries(config.unwrap_or_default()).await;
+        (
+            detected.makemkv.found.then_some(detected.makemkv.command).flatten(),
+            detected
+                .handbrake
+                .found
+                .then_some(detected.handbrake.command)
+                .flatten(),
+        )
+    };
+    Ok(state.set_paused(paused, makemkv_cmd, handbrake_cmd).await)
+}
+
+/// Enables or disables native OS desktop completion & disc-eject notifications.
+#[tauri::command]
+fn set_desktop_notifications(
+    enabled: bool,
+    state: tauri::State<'_, PipelineController>,
+) -> Result<(), String> {
+    state.set_notifications_enabled(enabled);
+    Ok(())
+}
+
 /// Cancels a queued or running job and terminates its active child process if running.
 #[tauri::command]
 async fn cancel_job(
@@ -495,6 +600,9 @@ pub fn run() {
             scan_drives,
             scan_disc,
             list_handbrake_presets,
+            probe_video_encoders,
+            get_disk_space,
+            send_os_notification,
             generate_sample_clip,
             generate_trickplay_preview,
             get_recommended_quality_profiles,
@@ -513,6 +621,12 @@ pub fn run() {
             undo_last_organize,
             enqueue_jobs,
             get_queue,
+            get_queue_state,
+            move_queue_job,
+            reorder_queue_job,
+            remove_queue_job,
+            set_queue_paused,
+            set_desktop_notifications,
             cancel_job,
             retry_job,
             clear_finished_jobs,

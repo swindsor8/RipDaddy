@@ -165,22 +165,24 @@
 
 {#if open}
   <div
-    class="fixed inset-0 z-50 flex items-center justify-center bg-black/25 p-4 backdrop-blur-[2px]"
+    class="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4 backdrop-blur-[2px] dark:bg-black/60"
   >
     <div
       role="dialog"
       aria-modal="true"
       aria-label="Organize output folders"
-      class="flex w-full max-w-[610px] flex-col overflow-hidden rounded-2xl border border-[#DAD3C7] bg-white shadow-[0_28px_70px_rgba(26,21,19,0.18)]"
+      class="flex w-full max-w-[610px] flex-col overflow-hidden rounded-2xl border border-[#DAD3C7] bg-white shadow-[0_28px_70px_rgba(26,21,19,0.18)] dark:border-[#3A2F2A] dark:bg-[#1A1513] dark:shadow-[0_28px_70px_rgba(0,0,0,0.55)]"
     >
       <div
         class="h-[3px] w-full shrink-0 bg-gradient-to-r from-[#4CDE99] via-[#F8B142] to-[#FA637C]"
         aria-hidden="true"
       ></div>
       <!-- Header -->
-      <header class="border-b border-[#E6E0D6] bg-[#FAF8F4] px-6 py-4">
+      <header
+        class="border-b border-[#E6E0D6] bg-[#FAF8F4] px-6 py-4 dark:border-[#332925] dark:bg-[#120E0D]"
+      >
         <div class="flex items-center justify-between gap-2">
-          <h2 class="text-sm font-extrabold tracking-[-0.02em] text-[#1A1513]">
+          <h2 class="text-sm font-extrabold tracking-[-0.02em] text-[#1A1513] dark:text-[#F5EFE8]">
             {#if batchKind === "movies"}
               Organize movies into individual folders?
             {:else if batchKind === "mixed"}
@@ -192,19 +194,19 @@
 
           {#if batchKind === "movies"}
             <span
-              class="rounded-full border border-[#1FA868] bg-[#E6FBF1] px-2.5 py-0.5 font-mono text-[10px] font-bold text-[#0E4D31]"
+              class="rounded-full border border-[#1FA868] bg-[#E6FBF1] px-2.5 py-0.5 font-mono text-[10px] font-bold text-[#0E4D31] dark:border-[#4CDE99]/40 dark:bg-[#4CDE99]/15 dark:text-[#7AF0B8]"
             >
               {selectedFileCount} Movie{selectedFileCount === 1 ? "" : "s"}
             </span>
           {:else if batchKind === "mixed"}
             <span
-              class="rounded-full border border-[#D68D1C] bg-[#FFF7E6] px-2.5 py-0.5 font-mono text-[10px] font-bold text-[#5E3906]"
+              class="rounded-full border border-[#D68D1C] bg-[#FFF7E6] px-2.5 py-0.5 font-mono text-[10px] font-bold text-[#5E3906] dark:border-[#F8B142]/45 dark:bg-[#F8B142]/15 dark:text-[#FCD283]"
             >
               Mixed Movies + TV
             </span>
           {:else if detectedSeasons.length > 1}
             <span
-              class="rounded-full border border-[#1C8EC0] bg-[#E6F6FD] px-2.5 py-0.5 font-mono text-[10px] font-bold text-[#0E5678]"
+              class="rounded-full border border-[#1C8EC0] bg-[#E6F6FD] px-2.5 py-0.5 font-mono text-[10px] font-bold text-[#0E5678] dark:border-[#5BC0EB]/40 dark:bg-[#5BC0EB]/15 dark:text-[#8BD7F8]"
             >
               {detectedSeasons.length} Seasons ({detectedSeasons
                 .map((s) => (s === 0 ? "Specials" : `S${String(s).padStart(2, "0")}`))
@@ -212,7 +214,7 @@
             </span>
           {:else if detectedSeasons.length === 1}
             <span
-              class="rounded-full border border-[#E6E0D6] bg-white px-2 py-0.5 font-mono text-[10px] font-semibold text-[#61554F]"
+              class="rounded-full border border-[#E6E0D6] bg-white px-2 py-0.5 font-mono text-[10px] font-semibold text-[#61554F] dark:border-[#3A2F2A] dark:bg-[#221C19] dark:text-[#CFC5BB]"
             >
               {detectedSeasons[0] === 0
                 ? "Specials"
@@ -220,19 +222,19 @@
             </span>
           {/if}
         </div>
-        <p class="mt-1 text-xs leading-relaxed text-[#61554F]">
+        <p class="mt-1 text-xs leading-relaxed text-[#61554F] dark:text-[#B8ABA0]">
           {#if batchKind === "movies"}
             Choose whether each encoded movie gets its own Plex/Jellyfin folder
-            (<span class="font-mono text-[#1A1513]">Movie (Year)/Movie (Year).ext</span>)
+            (<span class="font-mono text-[#1A1513] dark:text-[#F5EFE8]">Movie (Year)/Movie (Year).ext</span>)
             or writes flat into your output folder.
           {:else if batchKind === "mixed"}
             Both movies and TV episodes are queued. Choose whether RipDaddy should
-            automatically create movie folders and <span class="font-mono text-[#1A1513]">Season XX</span>
+            automatically create movie folders and <span class="font-mono text-[#1A1513] dark:text-[#F5EFE8]">Season XX</span>
             subfolders as it encodes, or write everything flat.
           {:else if detectedSeasons.length > 1}
-            Multiple seasons of <span class="font-semibold text-[#1A1513]">{showTitle || "this show"}</span>
+            Multiple seasons of <span class="font-semibold text-[#1A1513] dark:text-[#F5EFE8]">{showTitle || "this show"}</span>
             are queued together. Choose whether RipDaddy should automatically
-            create <span class="font-mono text-[#1A1513]">Season XX</span> folders
+            create <span class="font-mono text-[#1A1513] dark:text-[#F5EFE8]">Season XX</span> folders
             as each episode encodes, or keep files flat.
           {:else}
             Choose how RipDaddy should place the {selectedFileCount} encoded
@@ -245,13 +247,13 @@
       <div class="space-y-3.5 p-6">
         <!-- Output Directory Picker Strip -->
         <div
-          class="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[#E6E0D6] bg-[#F7F4EE] px-3 py-2 text-[11px]"
+          class="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[#E6E0D6] bg-[#F7F4EE] px-3 py-2 text-[11px] dark:border-[#332925] dark:bg-[#221C19]"
         >
           <div class="min-w-0 flex-1">
-            <span class="font-bold uppercase tracking-[0.06em] text-[#7D716A]">
+            <span class="font-bold uppercase tracking-[0.06em] text-[#7D716A] dark:text-[#9E9187]">
               Output Folder:
             </span>
-            <p class="truncate font-mono text-[#1A1513]" title={outputDir}>
+            <p class="truncate font-mono text-[#1A1513] dark:text-[#F5EFE8]" title={outputDir}>
               {outputDir}
             </p>
           </div>
@@ -264,7 +266,7 @@
                   selectedOrg = batchKind === "tvSeries" ? "seasonOnly" : "showAndSeason";
                 }}
                 title={`Output directly inside ${sourceFolderPath}`}
-                class="rounded border border-[#9CD9F5] bg-[#E6F6FD] px-2 py-1 text-[10px] font-semibold text-[#0E5678] hover:bg-[#D1EFFB]"
+                class="rounded border border-[#9CD9F5] bg-[#E6F6FD] px-2 py-1 text-[10px] font-semibold text-[#0E5678] hover:bg-[#D1EFFB] dark:border-[#5BC0EB]/40 dark:bg-[#5BC0EB]/15 dark:text-[#8BD7F8] dark:hover:bg-[#5BC0EB]/25"
               >
                 Use "{folderBaseName(sourceFolderPath)}"
               </button>
@@ -272,7 +274,7 @@
             <button
               type="button"
               onclick={onBrowseOutputDir}
-              class="rounded border border-[#DAD3C7] bg-white px-2 py-1 text-[10px] font-semibold text-[#1A1513] hover:bg-[#F2EDE5]"
+              class="rounded border border-[#DAD3C7] bg-white px-2 py-1 text-[10px] font-semibold text-[#1A1513] hover:bg-[#F2EDE5] dark:border-[#3A2F2A] dark:bg-[#1A1513] dark:text-[#F5EFE8] dark:hover:bg-[#2E2622]"
             >
               Change...
             </button>
@@ -287,8 +289,8 @@
             onclick={() => (selectedOrg = "showAndSeason")}
             class={`w-full rounded-xl border p-3.5 text-left transition ${
               selectedOrg === "showAndSeason"
-                ? "border-[#11824F] bg-[#EEFCF5] ring-1 ring-[#11824F]"
-                : "border-[#E6E0D6] bg-white hover:border-[#C4BCB0]"
+                ? "border-[#11824F] bg-[#EEFCF5] ring-1 ring-[#11824F] dark:border-[#4CDE99] dark:bg-[#4CDE99]/10 dark:ring-[#4CDE99]"
+                : "border-[#E6E0D6] bg-white hover:border-[#C4BCB0] dark:border-[#332925] dark:bg-[#221C19] dark:hover:border-[#4A3D37]"
             }`}
           >
             <div class="flex items-center justify-between gap-2">
@@ -296,15 +298,15 @@
                 <span
                   class={`flex h-4 w-4 items-center justify-center rounded-full border ${
                     selectedOrg === "showAndSeason"
-                      ? "border-[#11824F] bg-[#11824F]"
-                      : "border-[#C4BCB0] bg-white"
+                      ? "border-[#11824F] bg-[#11824F] dark:border-[#4CDE99] dark:bg-[#4CDE99]"
+                      : "border-[#C4BCB0] bg-white dark:border-[#4A3D37] dark:bg-[#1A1513]"
                   }`}
                 >
                   {#if selectedOrg === "showAndSeason"}
-                    <span class="h-1.5 w-1.5 rounded-full bg-white"></span>
+                    <span class="h-1.5 w-1.5 rounded-full bg-white dark:bg-[#120E0D]"></span>
                   {/if}
                 </span>
-                <span class="text-xs font-bold text-[#1A1513]">
+                <span class="text-xs font-bold text-[#1A1513] dark:text-[#F5EFE8]">
                   {#if batchKind === "movies"}
                     Create a folder for each Movie
                   {:else if batchKind === "mixed"}
@@ -316,13 +318,13 @@
               </div>
               {#if recommendedOrg === "showAndSeason"}
                 <span
-                  class="rounded-full border border-[#1FA868] bg-[#E6FBF1] px-2 py-0.5 text-[9px] font-bold uppercase text-[#0E4D31]"
+                  class="rounded-full border border-[#1FA868] bg-[#E6FBF1] px-2 py-0.5 text-[9px] font-bold uppercase text-[#0E4D31] dark:border-[#4CDE99]/40 dark:bg-[#4CDE99]/15 dark:text-[#7AF0B8]"
                 >
                   Recommended
                 </span>
               {/if}
             </div>
-            <p class="mt-1 pl-6 text-[11px] text-[#70645D]">
+            <p class="mt-1 pl-6 text-[11px] text-[#70645D] dark:text-[#A69990]">
               {#if batchKind === "movies"}
                 Plex &amp; Jellyfin standard — each movie gets its own clean subfolder.
               {:else}
@@ -330,7 +332,7 @@
               {/if}
             </p>
             <div
-              class="mt-2 ml-6 space-y-0.5 rounded-md border border-[#E6E0D6] bg-white px-2.5 py-1.5 font-mono text-[10px] text-[#3F3530]"
+              class="mt-2 ml-6 space-y-0.5 rounded-md border border-[#E6E0D6] bg-white px-2.5 py-1.5 font-mono text-[10px] text-[#3F3530] dark:border-[#332925] dark:bg-[#120E0D] dark:text-[#CFC5BB]"
             >
               {#each sampleItems as sample, idx (`full-${sample.kind}-${sample.title}-${sample.season ?? 0}-${sample.episode ?? idx}`)}
                 <p class="truncate">{formatSamplePath(sample, "showAndSeason")}</p>
@@ -345,8 +347,8 @@
               onclick={() => (selectedOrg = "seasonOnly")}
               class={`w-full rounded-xl border p-3.5 text-left transition ${
                 selectedOrg === "seasonOnly"
-                  ? "border-[#11824F] bg-[#EEFCF5] ring-1 ring-[#11824F]"
-                  : "border-[#E6E0D6] bg-white hover:border-[#C4BCB0]"
+                  ? "border-[#11824F] bg-[#EEFCF5] ring-1 ring-[#11824F] dark:border-[#4CDE99] dark:bg-[#4CDE99]/10 dark:ring-[#4CDE99]"
+                  : "border-[#E6E0D6] bg-white hover:border-[#C4BCB0] dark:border-[#332925] dark:bg-[#221C19] dark:hover:border-[#4A3D37]"
               }`}
             >
               <div class="flex items-center justify-between gap-2">
@@ -354,31 +356,31 @@
                   <span
                     class={`flex h-4 w-4 items-center justify-center rounded-full border ${
                       selectedOrg === "seasonOnly"
-                        ? "border-[#11824F] bg-[#11824F]"
-                        : "border-[#C4BCB0] bg-white"
+                        ? "border-[#11824F] bg-[#11824F] dark:border-[#4CDE99] dark:bg-[#4CDE99]"
+                        : "border-[#C4BCB0] bg-white dark:border-[#4A3D37] dark:bg-[#1A1513]"
                     }`}
                   >
                     {#if selectedOrg === "seasonOnly"}
-                      <span class="h-1.5 w-1.5 rounded-full bg-white"></span>
+                      <span class="h-1.5 w-1.5 rounded-full bg-white dark:bg-[#120E0D]"></span>
                     {/if}
                   </span>
-                  <span class="text-xs font-bold text-[#1A1513]">
+                  <span class="text-xs font-bold text-[#1A1513] dark:text-[#F5EFE8]">
                     Create Season folders directly inside Output folder
                   </span>
                 </div>
                 {#if recommendedOrg === "seasonOnly"}
                   <span
-                    class="rounded-full border border-[#1FA868] bg-[#E6FBF1] px-2 py-0.5 text-[9px] font-bold uppercase text-[#0E4D31]"
+                    class="rounded-full border border-[#1FA868] bg-[#E6FBF1] px-2 py-0.5 text-[9px] font-bold uppercase text-[#0E4D31] dark:border-[#4CDE99]/40 dark:bg-[#4CDE99]/15 dark:text-[#7AF0B8]"
                   >
                     Recommended
                   </span>
                 {/if}
               </div>
-              <p class="mt-1 pl-6 text-[11px] text-[#70645D]">
+              <p class="mt-1 pl-6 text-[11px] text-[#70645D] dark:text-[#A69990]">
                 Ideal when your output folder is already named "{showTitle || "the show"}" — avoids nesting the show name twice.
               </p>
               <div
-                class="mt-2 ml-6 space-y-0.5 rounded-md border border-[#E6E0D6] bg-white px-2.5 py-1.5 font-mono text-[10px] text-[#3F3530]"
+                class="mt-2 ml-6 space-y-0.5 rounded-md border border-[#E6E0D6] bg-white px-2.5 py-1.5 font-mono text-[10px] text-[#3F3530] dark:border-[#332925] dark:bg-[#120E0D] dark:text-[#CFC5BB]"
               >
                 {#each sampleItems as sample, idx (`season-${sample.kind}-${sample.title}-${sample.season ?? 0}-${sample.episode ?? idx}`)}
                   <p class="truncate">{formatSamplePath(sample, "seasonOnly")}</p>
@@ -393,8 +395,8 @@
             onclick={() => (selectedOrg = "flat")}
             class={`w-full rounded-xl border p-3.5 text-left transition ${
               selectedOrg === "flat"
-                ? "border-[#11824F] bg-[#EEFCF5] ring-1 ring-[#11824F]"
-                : "border-[#E6E0D6] bg-white hover:border-[#C4BCB0]"
+                ? "border-[#11824F] bg-[#EEFCF5] ring-1 ring-[#11824F] dark:border-[#4CDE99] dark:bg-[#4CDE99]/10 dark:ring-[#4CDE99]"
+                : "border-[#E6E0D6] bg-white hover:border-[#C4BCB0] dark:border-[#332925] dark:bg-[#221C19] dark:hover:border-[#4A3D37]"
             }`}
           >
             <div class="flex items-center justify-between gap-2">
@@ -402,31 +404,31 @@
                 <span
                   class={`flex h-4 w-4 items-center justify-center rounded-full border ${
                     selectedOrg === "flat"
-                      ? "border-[#11824F] bg-[#11824F]"
-                      : "border-[#C4BCB0] bg-white"
+                      ? "border-[#11824F] bg-[#11824F] dark:border-[#4CDE99] dark:bg-[#4CDE99]"
+                      : "border-[#C4BCB0] bg-white dark:border-[#4A3D37] dark:bg-[#1A1513]"
                   }`}
                 >
                   {#if selectedOrg === "flat"}
-                    <span class="h-1.5 w-1.5 rounded-full bg-white"></span>
+                    <span class="h-1.5 w-1.5 rounded-full bg-white dark:bg-[#120E0D]"></span>
                   {/if}
                 </span>
-                <span class="text-xs font-bold text-[#1A1513]">
+                <span class="text-xs font-bold text-[#1A1513] dark:text-[#F5EFE8]">
                   Keep flat (no extra subfolders)
                 </span>
               </div>
               {#if recommendedOrg === "flat"}
                 <span
-                  class="rounded-full border border-[#1FA868] bg-[#E6FBF1] px-2 py-0.5 text-[9px] font-bold uppercase text-[#0E4D31]"
+                  class="rounded-full border border-[#1FA868] bg-[#E6FBF1] px-2 py-0.5 text-[9px] font-bold uppercase text-[#0E4D31] dark:border-[#4CDE99]/40 dark:bg-[#4CDE99]/15 dark:text-[#7AF0B8]"
                 >
                   Recommended
                 </span>
               {/if}
             </div>
-            <p class="mt-1 pl-6 text-[11px] text-[#70645D]">
+            <p class="mt-1 pl-6 text-[11px] text-[#70645D] dark:text-[#A69990]">
               Writes every renamed file directly into your output directory without creating nested folders.
             </p>
             <div
-              class="mt-2 ml-6 space-y-0.5 rounded-md border border-[#E6E0D6] bg-white px-2.5 py-1.5 font-mono text-[10px] text-[#3F3530]"
+              class="mt-2 ml-6 space-y-0.5 rounded-md border border-[#E6E0D6] bg-white px-2.5 py-1.5 font-mono text-[10px] text-[#3F3530] dark:border-[#332925] dark:bg-[#120E0D] dark:text-[#CFC5BB]"
             >
               {#each sampleItems as sample, idx (`flat-${sample.kind}-${sample.title}-${sample.season ?? 0}-${sample.episode ?? idx}`)}
                 <p class="truncate">{formatSamplePath(sample, "flat")}</p>
@@ -437,13 +439,13 @@
 
         <label
           for="remember-folder-org"
-          class="flex cursor-pointer items-center gap-2 pt-1 text-xs text-[#61554F]"
+          class="flex cursor-pointer items-center gap-2 pt-1 text-xs text-[#61554F] dark:text-[#B8ABA0]"
         >
           <input
             id="remember-folder-org"
             type="checkbox"
             bind:checked={saveAsDefault}
-            class="h-3.5 w-3.5 accent-[#1A1513]"
+            class="h-3.5 w-3.5 accent-[#11824F] dark:accent-[#4CDE99]"
           />
           <span>
             Remember this choice and don't ask again (changeable anytime in Settings → Metadata &amp; Naming)
@@ -453,12 +455,12 @@
 
       <!-- Footer -->
       <footer
-        class="flex items-center justify-between gap-3 border-t border-[#E6E0D6] bg-[#FAF8F4] px-6 py-3.5"
+        class="flex items-center justify-between gap-3 border-t border-[#E6E0D6] bg-[#FAF8F4] px-6 py-3.5 dark:border-[#332925] dark:bg-[#120E0D]"
       >
         <button
           type="button"
           onclick={onCancel}
-          class="rounded-md border border-[#DAD3C7] bg-white px-3 py-1.5 text-xs font-semibold text-[#61554F] hover:bg-[#EDE7DD] hover:text-[#1A1513]"
+          class="rounded-md border border-[#DAD3C7] bg-white px-3 py-1.5 text-xs font-semibold text-[#61554F] hover:bg-[#EDE7DD] hover:text-[#1A1513] dark:border-[#3A2F2A] dark:bg-[#221C19] dark:text-[#CFC5BB] dark:hover:bg-[#2E2622] dark:hover:text-[#F5EFE8]"
         >
           Cancel
         </button>

@@ -19,6 +19,10 @@
     shortEncoderLabel,
     shortResolutionLabel,
   } from "./lib/qualityDefaults";
+  import {
+    analyzeDiscTitles,
+    dedupeTitleSelection,
+  } from "./lib/discTitleFilters";
   import type {
     AppSettings,
     AutoSetupResult,
@@ -30,6 +34,8 @@
     DiscLabelGuess,
     DiscScanResult,
     DiscTitle,
+    DiskSpaceInfo,
+    EncoderCapabilities,
     EnqueueJobRequest,
     EpisodeInfo,
     EpisodePreviewSample,
@@ -54,9 +60,13 @@
     PreviewFrame,
     QualityProfile,
     QueueJob,
+    QueueStateSnapshot,
+    ReorderAction,
     ResolutionTier,
     SettingsCategory,
+    StorageSpaceReport,
     StreamTrack,
+    ThemeMode,
     TrackSelectionOptions,
     TrickplayPreview,
     UndoOrganizeResult,
@@ -66,12 +76,20 @@
 
   const SETTINGS_STORE_FILE = "settings.json";
 
-  // Binary detection & OS auto-setup state
+  // Binary detection, GPU probing, disk space & OS notifications state
   let binaries = $state<BinariesCheckResult | null>(null);
   let checkingBinaries = $state(false);
   let installingBinary = $state<BinaryKind | "all" | null>(null);
   let checkError = $state<string | null>(null);
   let setupOutcomes = $state<BinaryInstallOutcome[]>([]);
+  let encoderCaps = $state<EncoderCapabilities | null>(null);
+  let probingEncoders = $state(false);
+  let storageSpace = $state<StorageSpaceReport | null>(null);
+  let loadingDiskSpace = $state(false);
+  let testingNotification = $state(false);
+  let notificationTestStatus = $state<string | null>(null);
+  let notificationBanner = $state<{ title: string; body: string; kind: "info" | "success" | "warn" } | null>(null);
+  let systemPrefersDark = $state(false);
 
   // Categorized settings dropdown & first-run onboarding state
   let settingsOpen = $state(false);
@@ -79,6 +97,8 @@
   let firstRunModalOpen = $state(false);
 
   let settings = $state<AppSettings>({
+    theme: "light",
+    desktopNotifications: true,
     defaultMode: "ripAndEncode",
     autoSetupOnFirstRun: true,
     firstRunSetupDone: false,
@@ -178,6 +198,8 @@
 
   // Queue state & live CLI log lines per job
   let queueJobs = $state<QueueJob[]>([]);
+  let queuePaused = $state(false);
+  let restoredPendingCount = $state(0);
   let jobLogs = $state<Record<string, string[]>>({});
 
   const MAX_LOG_LINES_PER_JOB = 250;
@@ -299,6 +321,102 @@
       settings.activeDelivery,
     );
     return settings.qualityProfiles[key] ?? null;
+  });
+
+  const resolvedDark = $derived(
+    settings.theme === "dark" ||
+      (settings.theme === "system" && systemPrefersDark),
+  );
+
+  // Apply Warm Espresso dark mode class to <html> and mirror preference to localStorage
+  $effect(() => {
+    const isDark = resolvedDark;
+    const pref = settings.theme;
+    if (typeof document !== "undefined") {
+      document.documentElement.classList.toggle("dark", isDark);
+    }
+    try {
+      localStorage.setItem("ripdaddy-theme", pref);
+    } catch {
+      // Ignore storage failures in restricted contexts.
+    }
+  });
+
+  // Smart disc title analysis (Main Feature, Episodes 20–65m, duplicate-duration obfuscation)
+  const discAnalysis = $derived.by(() => analyzeDiscTitles(titles));
+
+  const inspectedTitleDuplicateGroup = $derived(
+    inspectedTitleId !== null
+      ? (discAnalysis.duplicateByTitleId[inspectedTitleId] ?? null)
+      : null,
+  );
+
+  const selectedDiscBytes = $derived.by(() => {
+    if (isLocalMode) return 0;
+    return titles
+      .filter((t) => checkedTitleIds.includes(t.titleId))
+      .reduce((sum, t) => sum + (t.sizeBytes ?? 0), 0);
+  });
+
+  const hasCheckedDuplicates = $derived.by(() => {
+    if (discAnalysis.duplicateGroups.length === 0) return false;
+    const selectedSet = new Set(checkedTitleIds);
+    return discAnalysis.duplicateGroups.some(
+      (g) => g.titleIds.filter((id) => selectedSet.has(id)).length > 1,
+    );
+  });
+
+  const activeDiskSpaceWarning = $derived.by<{
+    level: "low" | "critical";
+    message: string;
+  } | null>(() => {
+    if (isOrganizeMode || !storageSpace) return null;
+
+    const targetInfo: DiskSpaceInfo | null =
+      workflowMode === "ripOnly" || workflowMode === "encodeOnly"
+        ? storageSpace.output
+        : storageSpace.temp;
+    const targetLabel =
+      workflowMode === "ripOnly" || workflowMode === "encodeOnly"
+        ? "Output folder"
+        : "Temp rip folder";
+
+    if (!targetInfo) return null;
+
+    if (targetInfo.isTmpfs && workflowMode !== "encodeOnly") {
+      return {
+        level: "critical",
+        message: `${targetLabel} is mounted on RAM-backed tmpfs (${formatDiskBytes(targetInfo.availableBytes)}). Switch it to a physical drive in Settings → Storage before ripping.`,
+      };
+    }
+
+    if (!isLocalMode && selectedDiscBytes > 0) {
+      if (selectedDiscBytes > targetInfo.availableBytes) {
+        return {
+          level: "critical",
+          message: `Insufficient space in ${targetLabel}: selected titles total ~${formatBytesHuman(selectedDiscBytes)}, but only ${formatDiskBytes(targetInfo.availableBytes)} is available.`,
+        };
+      }
+      if (
+        workflowMode === "ripAndEncode" &&
+        storageSpace.sameVolume &&
+        selectedDiscBytes * 1.35 > targetInfo.availableBytes
+      ) {
+        return {
+          level: "low",
+          message: `Tight headroom on shared volume: selected titles need ~${formatBytesHuman(selectedDiscBytes)} temp staging + encoded output (${formatDiskBytes(targetInfo.availableBytes)} free).`,
+        };
+      }
+    }
+
+    if (targetInfo.severity === "critical") {
+      return {
+        level: "critical",
+        message: `${targetLabel} is critically low (${formatDiskBytes(targetInfo.availableBytes)} free). Blu-ray remuxes require 40–80 GB.`,
+      };
+    }
+
+    return null;
   });
 
   function formatProviderTagFor(
@@ -716,9 +834,85 @@
       namingConvention = value as NamingConvention;
     } else if (key === "defaultMetadataProvider") {
       metadataProvider = value as MetadataProvider;
+    } else if (key === "desktopNotifications") {
+      void invoke("set_desktop_notifications", { enabled: Boolean(value) }).catch(
+        () => {},
+      );
+    } else if (key === "tempDir" || key === "outputDir") {
+      void refreshDiskSpace();
     }
 
     void persistSetting(key, value);
+  }
+
+  function toggleDarkMode(): void {
+    updateSetting("theme", resolvedDark ? "light" : "dark");
+  }
+
+  function formatDiskBytes(bytes: number): string {
+    const tb = bytes / 1024 ** 4;
+    if (tb >= 1) return `${tb.toFixed(tb >= 10 ? 1 : 2)} TB`;
+    const gb = bytes / 1024 ** 3;
+    if (gb >= 1) return `${gb.toFixed(gb >= 100 ? 0 : 1)} GB`;
+    const mb = bytes / 1024 ** 2;
+    return `${mb.toFixed(0)} MB`;
+  }
+
+  async function refreshDiskSpace(): Promise<void> {
+    loadingDiskSpace = true;
+    try {
+      storageSpace = await invoke<StorageSpaceReport>("get_disk_space", {
+        tempDir: settings.tempDir,
+        outputDir: settings.outputDir,
+      });
+    } catch {
+      // Ignore outside Tauri runtime.
+    } finally {
+      loadingDiskSpace = false;
+    }
+  }
+
+  async function runProbeEncoders(): Promise<void> {
+    probingEncoders = true;
+    try {
+      encoderCaps = await invoke<EncoderCapabilities>("probe_video_encoders", {
+        config: currentBinaryConfig(),
+      });
+    } catch {
+      encoderCaps = null;
+    } finally {
+      probingEncoders = false;
+    }
+  }
+
+  async function handleTestNotification(): Promise<void> {
+    testingNotification = true;
+    notificationTestStatus = null;
+    try {
+      await invoke("send_os_notification", {
+        title: "RipDaddy · Test Notification",
+        body: "Native OS completion & disc-eject alerts are working!",
+      });
+      notificationTestStatus = "Notification sent ✓";
+    } catch (err) {
+      notificationTestStatus =
+        err instanceof Error ? err.message : String(err);
+    } finally {
+      testingNotification = false;
+    }
+  }
+
+  function showTransientBanner(
+    title: string,
+    body: string,
+    kind: "info" | "success" | "warn",
+  ): void {
+    notificationBanner = { title, body, kind };
+    setTimeout(() => {
+      if (notificationBanner?.title === title && notificationBanner?.body === body) {
+        notificationBanner = null;
+      }
+    }, 12000);
   }
 
   async function readStoreValue<T>(key: string): Promise<T | null> {
@@ -730,6 +924,16 @@
     try {
       settingsStore = await Store.load(SETTINGS_STORE_FILE);
 
+      const savedTheme = await readStoreValue<ThemeMode>("theme");
+      if (
+        savedTheme === "light" ||
+        savedTheme === "dark" ||
+        savedTheme === "system"
+      ) {
+        settings.theme = savedTheme;
+      }
+      settings.desktopNotifications =
+        (await readStoreValue<boolean>("desktopNotifications")) ?? true;
       settings.defaultMode =
         (await readStoreValue<WorkspaceMode>("defaultMode")) ?? "ripAndEncode";
       settings.autoSetupOnFirstRun =
@@ -788,6 +992,9 @@
       outputContainer = activeSlot?.container ?? settings.defaultContainer;
       namingConvention = settings.namingConvention;
       metadataProvider = settings.defaultMetadataProvider;
+      void invoke("set_desktop_notifications", {
+        enabled: settings.desktopNotifications,
+      }).catch(() => {});
     } catch {
       settingsStore = null;
     }
@@ -864,6 +1071,7 @@
         config: currentBinaryConfig(),
       });
       binaries = result;
+      void runProbeEncoders();
       return result;
     } catch (err) {
       checkError =
@@ -910,11 +1118,80 @@
     }
   }
 
-  async function refreshQueue(): Promise<void> {
+  async function refreshQueue(expandIfRestored = false): Promise<void> {
     try {
-      queueJobs = await invoke<QueueJob[]>("get_queue");
+      const snap = await invoke<QueueStateSnapshot>("get_queue_state");
+      queueJobs = snap.jobs;
+      queuePaused = snap.paused;
+      restoredPendingCount = snap.restoredPendingCount;
+      if (expandIfRestored && snap.restoredPendingCount > 0) {
+        queueExpanded = true;
+      }
     } catch {
-      queueJobs = [];
+      try {
+        queueJobs = await invoke<QueueJob[]>("get_queue");
+      } catch {
+        queueJobs = [];
+      }
+    }
+  }
+
+  async function handleToggleQueuePaused(): Promise<void> {
+    queueActionError = null;
+    try {
+      const snap = await invoke<QueueStateSnapshot>("set_queue_paused", {
+        paused: !queuePaused,
+        config: currentBinaryConfig(),
+      });
+      queueJobs = snap.jobs;
+      queuePaused = snap.paused;
+      restoredPendingCount = snap.restoredPendingCount;
+    } catch (err) {
+      queueActionError = err instanceof Error ? err.message : String(err);
+    }
+  }
+
+  async function handleMoveJob(
+    jobId: string,
+    action: ReorderAction,
+  ): Promise<void> {
+    queueActionError = null;
+    try {
+      queueJobs = await invoke<QueueJob[]>("move_queue_job", {
+        jobId,
+        action,
+      });
+    } catch (err) {
+      queueActionError = err instanceof Error ? err.message : String(err);
+    }
+  }
+
+  async function handleReorderJobToIndex(
+    jobId: string,
+    targetIndex: number,
+  ): Promise<void> {
+    queueActionError = null;
+    try {
+      queueJobs = await invoke<QueueJob[]>("reorder_queue_job", {
+        jobId,
+        targetIndex,
+      });
+    } catch (err) {
+      queueActionError = err instanceof Error ? err.message : String(err);
+    }
+  }
+
+  async function handleRemoveJob(jobId: string): Promise<void> {
+    queueActionError = null;
+    try {
+      queueJobs = await invoke<QueueJob[]>("remove_queue_job", { jobId });
+      if (jobId in jobLogs) {
+        const next = { ...jobLogs };
+        delete next[jobId];
+        jobLogs = next;
+      }
+    } catch (err) {
+      queueActionError = err instanceof Error ? err.message : String(err);
     }
   }
 
@@ -1715,6 +1992,35 @@
     previewOpen = true;
   }
 
+  function selectMainFeatureTitle(): void {
+    const mainId = discAnalysis.mainFeatureTitleId;
+    if (mainId === null) return;
+    checkedTitleIds = [mainId];
+    inspectedTitleId = mainId;
+    previewOpen = true;
+  }
+
+  function selectDiscEpisodeTitles(): void {
+    const epIds = discAnalysis.episodeTitleIds;
+    if (epIds.length === 0) return;
+    checkedTitleIds = [...epIds];
+    mediaKind = "tvEpisode";
+    inspectedTitleId = epIds[0];
+    previewOpen = true;
+  }
+
+  function selectNoDiscTitles(): void {
+    checkedTitleIds = [];
+  }
+
+  function dedupeCheckedDiscTitles(): void {
+    checkedTitleIds = dedupeTitleSelection(
+      titles,
+      checkedTitleIds,
+      discAnalysis,
+    );
+  }
+
   async function handleScanDisc(driveIndex: number): Promise<void> {
     scanningDisc = true;
     scanStatusMessage = `Scanning disc in drive #${driveIndex}...`;
@@ -1735,17 +2041,18 @@
       activeDiscName = scan.discName;
 
       if (scan.titles.length > 0) {
+        const analysis = analyzeDiscTitles(scan.titles);
         if (mediaKind === "tvEpisode") {
-          checkedTitleIds = scan.titles.map((t) => t.titleId);
+          checkedTitleIds =
+            analysis.episodeTitleIds.length > 0
+              ? [...analysis.episodeTitleIds]
+              : scan.titles.map((t) => t.titleId);
         } else {
-          // Auto-select the longest title (typically the main feature)
-          let longest = scan.titles[0];
-          for (const t of scan.titles) {
-            if ((t.durationSeconds ?? 0) > (longest.durationSeconds ?? 0)) {
-              longest = t;
-            }
-          }
-          checkedTitleIds = [longest.titleId];
+          // Auto-select the main feature (longest title with smart tie-breaking)
+          checkedTitleIds =
+            analysis.mainFeatureTitleId !== null
+              ? [analysis.mainFeatureTitleId]
+              : [scan.titles[0].titleId];
         }
         inspectedTitleId = checkedTitleIds[0] ?? scan.titles[0].titleId;
         scanStatusMessage = null;
@@ -2288,6 +2595,7 @@
               outputDir: effectiveOutputDir,
               keepTempMkv: settings.keepTempMkv,
               autoEjectDisc: false,
+              notifyOnComplete: settings.desktopNotifications,
               namingConvention,
               folderOrganization: folderOrg,
               mediaMetadata: meta,
@@ -2321,6 +2629,7 @@
               outputDir: effectiveOutputDir,
               keepTempMkv: settings.keepTempMkv,
               autoEjectDisc: false,
+              notifyOnComplete: settings.desktopNotifications,
               namingConvention,
               folderOrganization: folderOrg,
               mediaMetadata: meta,
@@ -2367,6 +2676,7 @@
             outputDir: effectiveOutputDir,
             keepTempMkv: settings.keepTempMkv,
             autoEjectDisc: settings.autoEjectDisc && idx === ordered.length - 1,
+            notifyOnComplete: settings.desktopNotifications,
             namingConvention,
             folderOrganization: folderOrg,
             mediaMetadata: buildJobMetadata(idx, fallback, ordered.length, {
@@ -2455,6 +2765,17 @@
         } else {
           queueJobs = [...queueJobs, event.job];
         }
+        if (event.job.stage === "completed") {
+          void refreshDiskSpace();
+        }
+        break;
+      }
+      case "queueSnapshot": {
+        queueJobs = event.jobs;
+        queuePaused = event.paused;
+        if (!event.paused) {
+          restoredPendingCount = 0;
+        }
         break;
       }
       case "progress": {
@@ -2507,6 +2828,24 @@
             `[cleaningTemp] Removed temp MKV: ${event.removedPath}`,
           ],
         };
+        void refreshDiskSpace();
+        break;
+      }
+      case "discEjected": {
+        showTransientBanner(
+          "Disc Ready to Swap",
+          `${event.discName} finished ripping and ejected. Insert the next disc while encoding continues.`,
+          "info",
+        );
+        break;
+      }
+      case "batchCompleted": {
+        showTransientBanner(
+          event.title.replace(/^RipDaddy · /, ""),
+          event.body,
+          event.failed > 0 ? "warn" : "success",
+        );
+        void refreshDiskSpace();
         break;
       }
     }
@@ -2839,6 +3178,11 @@
   function openSettingsAt(category: SettingsCategory): void {
     settingsCategory = category;
     settingsOpen = true;
+    if (category === "storage") {
+      void refreshDiskSpace();
+    } else if (category === "encoding" && !encoderCaps && !probingEncoders) {
+      void runProbeEncoders();
+    }
   }
 
   function episodeCodeForRow(rowIndex: number): string {
@@ -2854,13 +3198,13 @@
   function trackPillClass(track: StreamTrack): string {
     switch (track.trackType) {
       case "video":
-        return "border-[#9CD9F5] bg-[#E6F6FD] text-[#0E5678]";
+        return "border-[#9CD9F5] bg-[#E6F6FD] text-[#0E5678] dark:border-[#5BC0EB]/40 dark:bg-[#5BC0EB]/15 dark:text-[#8BD7F8]";
       case "audio":
-        return "border-[#9BE5C1] bg-[#E6FBF1] text-[#0E4D31]";
+        return "border-[#9BE5C1] bg-[#E6FBF1] text-[#0E4D31] dark:border-[#4CDE99]/40 dark:bg-[#4CDE99]/15 dark:text-[#7AF0B8]";
       case "subtitle":
-        return "border-[#F0CB82] bg-[#FDF3DC] text-[#563406]";
+        return "border-[#F0CB82] bg-[#FDF3DC] text-[#563406] dark:border-[#F8B142]/40 dark:bg-[#F8B142]/15 dark:text-[#FCD283]";
       case "unknown":
-        return "border-[#E6E0D6] bg-[#FAF8F4] text-[#61554F]";
+        return "border-[#E6E0D6] bg-[#FAF8F4] text-[#61554F] dark:border-[#3A2F2A] dark:bg-[#221C19] dark:text-[#B8ABA0]";
     }
   }
 
@@ -2871,7 +3215,11 @@
 
   async function initialize(): Promise<void> {
     await loadPersistedSettings();
-    const [detected] = await Promise.all([runCheckBinaries(), refreshQueue()]);
+    const [detected] = await Promise.all([
+      runCheckBinaries(),
+      refreshQueue(true),
+      refreshDiskSpace(),
+    ]);
 
     if (detected) {
       const bothFound = detected.makemkv.found && detected.handbrake.found;
@@ -2889,6 +3237,16 @@
   onMount(() => {
     let unlisten: UnlistenFn | null = null;
     let unlistenDragDrop: UnlistenFn | null = null;
+    let mediaQuery: MediaQueryList | null = null;
+    const handleMediaChange = (e: MediaQueryListEvent) => {
+      systemPrefersDark = e.matches;
+    };
+
+    if (typeof window !== "undefined" && window.matchMedia) {
+      mediaQuery = window.matchMedia("(prefers-color-scheme: dark)");
+      systemPrefersDark = mediaQuery.matches;
+      mediaQuery.addEventListener("change", handleMediaChange);
+    }
 
     void listen<PipelineEvent>("pipeline-event", (evt) => {
       applyPipelineEvent(evt.payload);
@@ -2931,25 +3289,30 @@
       if (unlistenDragDrop) {
         unlistenDragDrop();
       }
+      if (mediaQuery) {
+        mediaQuery.removeEventListener("change", handleMediaChange);
+      }
     };
   });
 </script>
 
-<div class="relative flex h-screen w-screen flex-col overflow-hidden bg-[#FAF8F4] text-[#1A1513]">
+<div
+  class="relative flex h-screen w-screen flex-col overflow-hidden bg-[#FAF8F4] text-[#1A1513] dark:bg-[#120E0D] dark:text-[#F5EFE8]"
+>
   <!-- Native Drag-and-Drop Overlay -->
   {#if draggingOver}
     <div
-      class="pointer-events-none fixed inset-0 z-50 flex items-center justify-center bg-[#FAF8F4]/90 p-6 backdrop-blur-[3px]"
+      class="pointer-events-none fixed inset-0 z-50 flex items-center justify-center bg-[#FAF8F4]/90 p-6 backdrop-blur-[3px] dark:bg-[#120E0D]/90"
     >
       <div
-        class="flex max-w-md flex-col items-center rounded-2xl border-2 border-dashed border-[#1FA868] bg-white px-10 py-8 text-center shadow-[0_24px_60px_rgba(26,21,19,0.16)]"
+        class="flex max-w-md flex-col items-center rounded-2xl border-2 border-dashed border-[#1FA868] bg-white px-10 py-8 text-center shadow-[0_24px_60px_rgba(26,21,19,0.16)] dark:border-[#4CDE99] dark:bg-[#1A1513] dark:shadow-[0_24px_60px_rgba(0,0,0,0.55)]"
       >
         <RipDaddyLogo class="mb-3 h-14 w-14" alt="" />
-        <p class="text-base font-extrabold tracking-[-0.02em] text-[#1A1513]">
+        <p class="text-base font-extrabold tracking-[-0.02em] text-[#1A1513] dark:text-[#F5EFE8]">
           Drop folders or video files
         </p>
-        <p class="mt-1.5 text-xs leading-relaxed text-[#61554F]">
-          Drop a single show, a multi-show <span class="font-mono text-[#1A1513]">/TV Shows/</span>
+        <p class="mt-1.5 text-xs leading-relaxed text-[#61554F] dark:text-[#B8ABA0]">
+          Drop a single show, a multi-show <span class="font-mono text-[#1A1513] dark:text-[#F5EFE8]">/TV Shows/</span>
           root library, a movie folder, or loose video files to auto-identify and organize or batch encode.
         </p>
       </div>
@@ -2964,13 +3327,13 @@
 
   <!-- Row 1: Single Lean RipDaddy App Bar -->
   <header
-    class="flex h-12 shrink-0 items-center justify-between gap-4 border-b border-[#E6E0D6] bg-white px-5"
+    class="flex h-12 shrink-0 items-center justify-between gap-4 border-b border-[#E6E0D6] bg-white px-5 dark:border-[#332925] dark:bg-[#1A1513]"
   >
     <!-- Brand -->
     <div class="flex items-center gap-2.5">
       <RipDaddyLogo class="h-8 w-8" alt="" />
-      <span class="text-[16px] font-extrabold tracking-[-0.03em] text-[#1A1513]">
-        Rip<span class="text-[#11824F]">Daddy</span>
+      <span class="text-[16px] font-extrabold tracking-[-0.03em] text-[#1A1513] dark:text-[#F5EFE8]">
+        Rip<span class="text-[#11824F] dark:text-[#4CDE99]">Daddy</span>
       </span>
     </div>
 
@@ -2986,7 +3349,7 @@
         class={`rounded-full border px-3 py-1 text-xs font-semibold transition ${
           workflowMode === "ripOnly"
             ? "border-[#D9415D] bg-[#FA637C] text-[#1A1513] shadow-[0_1px_2px_rgba(0,0,0,0.08)]"
-            : "border-[#F8B4C0] bg-[#FFF0F2] text-[#751A2E] hover:bg-[#FFE0E5]"
+            : "border-[#F8B4C0] bg-[#FFF0F2] text-[#751A2E] hover:bg-[#FFE0E5] dark:border-[#FA637C]/40 dark:bg-[#FA637C]/12 dark:text-[#FF99AA] dark:hover:bg-[#FA637C]/22"
         }`}
       >
         Rip Only
@@ -2998,7 +3361,7 @@
         class={`rounded-full border px-3 py-1 text-xs font-semibold transition ${
           workflowMode === "ripAndEncode"
             ? "border-[#1FA868] bg-[#4CDE99] text-[#1A1513] shadow-[0_1px_2px_rgba(0,0,0,0.08)]"
-            : "border-[#9BE5C1] bg-[#E6FBF1] text-[#0E4D31] hover:bg-[#CEF6E3]"
+            : "border-[#9BE5C1] bg-[#E6FBF1] text-[#0E4D31] hover:bg-[#CEF6E3] dark:border-[#4CDE99]/40 dark:bg-[#4CDE99]/12 dark:text-[#7AF0B8] dark:hover:bg-[#4CDE99]/22"
         }`}
       >
         Rip + Encode
@@ -3010,7 +3373,7 @@
         class={`rounded-full border px-3 py-1 text-xs font-semibold transition ${
           workflowMode === "encodeOnly"
             ? "border-[#D68D1C] bg-[#F8B142] text-[#1A1513] shadow-[0_1px_2px_rgba(0,0,0,0.08)]"
-            : "border-[#F0CB82] bg-[#FDF3DC] text-[#563406] hover:bg-[#FBE4B4]"
+            : "border-[#F0CB82] bg-[#FDF3DC] text-[#563406] hover:bg-[#FBE4B4] dark:border-[#F8B142]/40 dark:bg-[#F8B142]/12 dark:text-[#FCD283] dark:hover:bg-[#F8B142]/22"
         }`}
       >
         Encode Only
@@ -3022,23 +3385,72 @@
         class={`rounded-full border px-3 py-1 text-xs font-semibold transition ${
           workflowMode === "organizeOnly"
             ? "border-[#1C8EC0] bg-[#5BC0EB] text-[#1A1513] shadow-[0_1px_2px_rgba(0,0,0,0.08)]"
-            : "border-[#9CD9F5] bg-[#E6F6FD] text-[#0E5678] hover:bg-[#D1EFFB]"
+            : "border-[#9CD9F5] bg-[#E6F6FD] text-[#0E5678] hover:bg-[#D1EFFB] dark:border-[#5BC0EB]/40 dark:bg-[#5BC0EB]/12 dark:text-[#8BD7F8] dark:hover:bg-[#5BC0EB]/22"
         }`}
       >
         Organize
       </button>
     </div>
 
-    <!-- Right: Preview Toggle + Unified Categorized Settings Dropdown -->
+    <!-- Right: Dark Mode Toggle + Preview Toggle + Categorized Settings Dropdown -->
     <div class="flex items-center gap-2">
+      <button
+        type="button"
+        onclick={toggleDarkMode}
+        aria-pressed={resolvedDark}
+        aria-label={resolvedDark
+          ? "Switch to Light Mode"
+          : "Switch to Warm Espresso Dark Mode"}
+        title={resolvedDark
+          ? "Warm Espresso Dark Mode active — click for Light Mode"
+          : "Switch to Warm Espresso Dark Mode"}
+        class="flex items-center gap-1.5 rounded-md border border-[#E6E0D6] bg-[#FAF8F4] px-2 py-1.5 text-xs font-semibold text-[#544943] transition hover:border-[#DAD3C7] hover:text-[#1A1513] dark:border-[#3A2F2A] dark:bg-[#221C19] dark:text-[#F8B142] dark:hover:border-[#F8B142]/50 dark:hover:bg-[#2B231F]"
+      >
+        {#if resolvedDark}
+          <svg
+            class="h-3.5 w-3.5"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <circle cx="12" cy="12" r="4" />
+            <path d="M12 2v2" />
+            <path d="M12 20v2" />
+            <path d="m4.93 4.93 1.41 1.41" />
+            <path d="m17.66 17.66 1.41 1.41" />
+            <path d="M2 12h2" />
+            <path d="M20 12h2" />
+            <path d="m6.34 17.66-1.41 1.41" />
+            <path d="m19.07 4.93-1.41 1.41" />
+          </svg>
+        {:else}
+          <svg
+            class="h-3.5 w-3.5"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z" />
+          </svg>
+        {/if}
+      </button>
+
       <button
         type="button"
         onclick={() => (previewOpen = !previewOpen)}
         aria-pressed={previewOpen}
         class={`flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-xs font-semibold transition ${
           previewOpen
-            ? "border-[#1C8EC0] bg-[#E6F6FD] text-[#0E5678]"
-            : "border-[#E6E0D6] bg-[#FAF8F4] text-[#544943] hover:text-[#1A1513]"
+            ? "border-[#1C8EC0] bg-[#E6F6FD] text-[#0E5678] dark:border-[#5BC0EB]/50 dark:bg-[#5BC0EB]/15 dark:text-[#8BD7F8]"
+            : "border-[#E6E0D6] bg-[#FAF8F4] text-[#544943] hover:text-[#1A1513] dark:border-[#3A2F2A] dark:bg-[#221C19] dark:text-[#CFC5BB] dark:hover:text-[#F5EFE8]"
         }`}
       >
         <svg
@@ -3060,13 +3472,16 @@
         onclick={() => {
           settingsCategory = !modeReady ? "binaries" : "general";
           settingsOpen = !settingsOpen;
+          if (settingsOpen) {
+            void refreshDiskSpace();
+          }
         }}
         aria-expanded={settingsOpen}
         aria-haspopup="dialog"
         class={`flex items-center gap-2 rounded-md border px-2.5 py-1.5 text-xs font-semibold transition ${
           settingsOpen
-            ? "border-[#1A1513] bg-[#1A1513] text-white"
-            : "border-[#DAD3C7] bg-white text-[#1A1513] hover:bg-[#FAF8F4]"
+            ? "border-[#1A1513] bg-[#1A1513] text-white dark:border-[#4CDE99] dark:bg-[#4CDE99] dark:text-[#120E0D]"
+            : "border-[#DAD3C7] bg-white text-[#1A1513] hover:bg-[#FAF8F4] dark:border-[#3A2F2A] dark:bg-[#221C19] dark:text-[#F5EFE8] dark:hover:bg-[#2B231F]"
         }`}
       >
         <span
@@ -3086,16 +3501,16 @@
     </div>
   </header>
 
-  <!-- Row 2: Compact Source, Preset & Primary Action Toolbar -->
+  <!-- Row 2: Compact Source, Preset, Disk Space & Primary Action Toolbar -->
   <div
-    class="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-[#E6E0D6] bg-[#FAF8F4] px-5 py-2"
+    class="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-[#E6E0D6] bg-[#FAF8F4] px-5 py-2 dark:border-[#332925] dark:bg-[#120E0D]"
   >
     <div class="flex flex-wrap items-center gap-3">
       {#if requiresMakeMkv}
         <div class="flex items-center gap-2">
           <label
             for="drive-select"
-            class="text-[11px] font-semibold text-[#61554F]"
+            class="text-[11px] font-semibold text-[#61554F] dark:text-[#B8ABA0]"
           >
             Drive
           </label>
@@ -3108,7 +3523,7 @@
               }
             }}
             disabled={!modeReady || drives.length === 0 || scanningDisc}
-            class="rounded-md border border-[#DAD3C7] bg-white px-2.5 py-1 text-xs font-medium text-[#1A1513] outline-none focus:border-[#1A1513] disabled:cursor-not-allowed disabled:bg-[#F2EDE5] disabled:text-[#92867F]"
+            class="rounded-md border border-[#DAD3C7] bg-white px-2.5 py-1 text-xs font-medium text-[#1A1513] outline-none focus:border-[#1A1513] disabled:cursor-not-allowed disabled:bg-[#F2EDE5] disabled:text-[#92867F] dark:border-[#3A2F2A] dark:bg-[#1A1513] dark:text-[#F5EFE8] dark:focus:border-[#4CDE99] dark:disabled:bg-[#221C19] dark:disabled:text-[#6E6058]"
           >
             {#if drives.length === 0}
               <option value={null}>No drives scanned</option>
@@ -3128,7 +3543,7 @@
             title={modeReady
               ? "Scan connected optical drives and disc titles via makemkvcon"
               : "Configure makemkvcon in Settings"}
-            class="rounded-md border border-[#DAD3C7] bg-white px-2.5 py-1 text-xs font-semibold text-[#1A1513] transition hover:bg-[#EDE7DD] disabled:cursor-not-allowed disabled:opacity-50"
+            class="rounded-md border border-[#DAD3C7] bg-white px-2.5 py-1 text-xs font-semibold text-[#1A1513] transition hover:bg-[#EDE7DD] disabled:cursor-not-allowed disabled:opacity-50 dark:border-[#3A2F2A] dark:bg-[#221C19] dark:text-[#F5EFE8] dark:hover:bg-[#2E2622]"
           >
             {scanningDrives || scanningDisc ? "Scanning..." : "Scan"}
           </button>
@@ -3142,7 +3557,7 @@
             title={isOrganizeMode
               ? "Connect a movie or TV directory to look up metadata, rename files, and sort into folders"
               : "Pick a TV season or video folder to auto-identify show + episodes and batch encode"}
-            class="rounded-md bg-[#11824F] px-3 py-1 text-xs font-semibold text-white transition hover:bg-[#0D6E42] disabled:cursor-not-allowed disabled:bg-[#D6CFC3] disabled:text-[#7D716A]"
+            class="rounded-md bg-[#11824F] px-3 py-1 text-xs font-semibold text-white transition hover:bg-[#0D6E42] disabled:cursor-not-allowed disabled:bg-[#D6CFC3] disabled:text-[#7D716A] dark:disabled:bg-[#2C2420] dark:disabled:text-[#6E6058]"
           >
             {#if identifyingFolder}
               Identifying...
@@ -3156,7 +3571,7 @@
             type="button"
             onclick={() => void pickLocalVideoFiles()}
             disabled={!modeReady || identifyingFolder}
-            class="rounded-md border border-[#DAD3C7] bg-white px-2.5 py-1 text-xs font-semibold text-[#1A1513] transition hover:bg-[#EDE7DD] disabled:cursor-not-allowed disabled:opacity-50"
+            class="rounded-md border border-[#DAD3C7] bg-white px-2.5 py-1 text-xs font-semibold text-[#1A1513] transition hover:bg-[#EDE7DD] disabled:cursor-not-allowed disabled:opacity-50 dark:border-[#3A2F2A] dark:bg-[#221C19] dark:text-[#F5EFE8] dark:hover:bg-[#2E2622]"
           >
             + Add Files
           </button>
@@ -3166,7 +3581,7 @@
               onclick={() => void handleAutoIdentifyLoadedFiles()}
               disabled={identifyingFolder}
               title="Auto-identify movies, show, and episode numbers via IMDb, TVDB, TMDB, or free TVMaze"
-              class="rounded-md border border-[#9CD9F5] bg-[#E6F6FD] px-2.5 py-1 text-xs font-semibold text-[#0E5678] transition hover:bg-[#D1EFFB] disabled:opacity-50"
+              class="rounded-md border border-[#9CD9F5] bg-[#E6F6FD] px-2.5 py-1 text-xs font-semibold text-[#0E5678] transition hover:bg-[#D1EFFB] disabled:opacity-50 dark:border-[#5BC0EB]/40 dark:bg-[#5BC0EB]/15 dark:text-[#8BD7F8] dark:hover:bg-[#5BC0EB]/25"
             >
               {isOrganizeMode ? "Re-Lookup" : "Auto-Identify"}
             </button>
@@ -3175,11 +3590,11 @@
       {/if}
 
       {#if requiresHandBrake}
-        <div class="h-4 w-px bg-[#E6E0D6]"></div>
+        <div class="h-4 w-px bg-[#E6E0D6] dark:bg-[#332925]"></div>
         <div class="flex flex-wrap items-center gap-2">
           <!-- Local vs Remote Delivery Pill Toggle -->
           <div
-            class="inline-flex rounded-full border border-[#DAD3C7] bg-white p-0.5 text-[11px]"
+            class="inline-flex rounded-full border border-[#DAD3C7] bg-white p-0.5 text-[11px] dark:border-[#3A2F2A] dark:bg-[#1A1513]"
             role="group"
             aria-label="Delivery target"
           >
@@ -3190,7 +3605,7 @@
               class={`rounded-full px-2.5 py-0.5 font-semibold transition ${
                 settings.activeDelivery === "local"
                   ? "bg-[#4CDE99] text-[#1A1513]"
-                  : "text-[#70645D] hover:text-[#1A1513]"
+                  : "text-[#70645D] hover:text-[#1A1513] dark:text-[#A69990] dark:hover:text-[#F5EFE8]"
               }`}
             >
               Local
@@ -3202,7 +3617,7 @@
               class={`rounded-full px-2.5 py-0.5 font-semibold transition ${
                 settings.activeDelivery === "remote"
                   ? "bg-[#5BC0EB] text-[#1A1513]"
-                  : "text-[#70645D] hover:text-[#1A1513]"
+                  : "text-[#70645D] hover:text-[#1A1513] dark:text-[#A69990] dark:hover:text-[#F5EFE8]"
               }`}
             >
               Remote
@@ -3211,7 +3626,7 @@
 
           <!-- 480p / 720p / 1080p / 4K Resolution Selector -->
           <div
-            class="inline-flex rounded-md border border-[#DAD3C7] bg-white p-0.5 font-mono text-[11px]"
+            class="inline-flex rounded-md border border-[#DAD3C7] bg-white p-0.5 font-mono text-[11px] dark:border-[#3A2F2A] dark:bg-[#1A1513]"
             role="group"
             aria-label="Target resolution"
           >
@@ -3222,8 +3637,8 @@
                   selectQualityTier(tier.id, settings.activeDelivery)}
                 class={`rounded px-2 py-0.5 font-semibold transition ${
                   settings.activeResolution === tier.id
-                    ? "bg-[#1A1513] text-white"
-                    : "text-[#544943] hover:bg-[#FAF8F4] hover:text-[#1A1513]"
+                    ? "bg-[#1A1513] text-white dark:bg-[#F5EFE8] dark:text-[#120E0D]"
+                    : "text-[#544943] hover:bg-[#FAF8F4] hover:text-[#1A1513] dark:text-[#B8ABA0] dark:hover:bg-[#221C19] dark:hover:text-[#F5EFE8]"
                 }`}
               >
                 {tier.shortLabel}
@@ -3236,8 +3651,8 @@
             <button
               type="button"
               onclick={() => openSettingsAt("encoding")}
-              title="Customize this resolution/delivery profile in Settings"
-              class="rounded-md border border-[#DAD3C7] bg-white px-2 py-1 font-mono text-[10px] font-semibold text-[#544943] transition hover:border-[#1A1513] hover:text-[#1A1513]"
+              title="Customize this resolution/delivery profile and GPU encoder in Settings"
+              class="rounded-md border border-[#DAD3C7] bg-white px-2 py-1 font-mono text-[10px] font-semibold text-[#544943] transition hover:border-[#1A1513] hover:text-[#1A1513] dark:border-[#3A2F2A] dark:bg-[#1A1513] dark:text-[#CFC5BB] dark:hover:border-[#4CDE99] dark:hover:text-[#F5EFE8]"
             >
               {shortEncoderLabel(activeQualityProfile.encoder)} · RF
               {activeQualityProfile.rfQuality.toFixed(0)} · .{outputContainer}
@@ -3246,17 +3661,17 @@
         </div>
       {/if}
 
-      <div class="h-4 w-px bg-[#E6E0D6]"></div>
+      <div class="h-4 w-px bg-[#E6E0D6] dark:bg-[#332925]"></div>
 
       {#if isOrganizeMode}
         <button
           type="button"
           onclick={() => void pickLocalVideoFolder()}
-          class="flex max-w-[340px] items-center gap-1.5 rounded-md border border-transparent px-2 py-1 text-[11px] text-[#61554F] transition hover:border-[#E6E0D6] hover:bg-white hover:text-[#1A1513]"
+          class="flex max-w-[340px] items-center gap-1.5 rounded-md border border-transparent px-2 py-1 text-[11px] text-[#61554F] transition hover:border-[#E6E0D6] hover:bg-white hover:text-[#1A1513] dark:text-[#B8ABA0] dark:hover:border-[#3A2F2A] dark:hover:bg-[#1A1513] dark:hover:text-[#F5EFE8]"
           title={sourceFolderPath || "Connect a folder to organize in place"}
         >
-          <span class="font-semibold text-[#0E5678]">Connected:</span>
-          <span class="truncate font-mono text-[#1A1513]">
+          <span class="font-semibold text-[#0E5678] dark:text-[#8BD7F8]">Connected:</span>
+          <span class="truncate font-mono text-[#1A1513] dark:text-[#F5EFE8]">
             {sourceFolderPath || "No folder connected"}
           </span>
         </button>
@@ -3264,12 +3679,67 @@
         <button
           type="button"
           onclick={() => openSettingsAt("storage")}
-          class="flex max-w-[260px] items-center gap-1.5 rounded-md border border-transparent px-2 py-1 text-[11px] text-[#61554F] transition hover:border-[#E6E0D6] hover:bg-white hover:text-[#1A1513]"
+          class="flex max-w-[230px] items-center gap-1.5 rounded-md border border-transparent px-2 py-1 text-[11px] text-[#61554F] transition hover:border-[#E6E0D6] hover:bg-white hover:text-[#1A1513] dark:text-[#B8ABA0] dark:hover:border-[#3A2F2A] dark:hover:bg-[#1A1513] dark:hover:text-[#F5EFE8]"
           title={`Output folder: ${resolvedOutputDir}`}
         >
-          <span class="font-semibold text-[#7D716A]">Output:</span>
-          <span class="truncate font-mono text-[#1A1513]">{resolvedOutputDir}</span>
+          <span class="font-semibold text-[#7D716A] dark:text-[#9E9187]">Output:</span>
+          <span class="truncate font-mono text-[#1A1513] dark:text-[#F5EFE8]">{resolvedOutputDir}</span>
         </button>
+
+        <!-- Temp / Output Free Disk Space Indicator Pill -->
+        {#if storageSpace && (storageSpace.temp || storageSpace.output)}
+          {@const tempInfo = storageSpace.temp}
+          {@const outInfo = storageSpace.output}
+          {@const worstSeverity =
+            activeDiskSpaceWarning?.level === "critical" ||
+            tempInfo?.severity === "critical" ||
+            outInfo?.severity === "critical"
+              ? "critical"
+              : activeDiskSpaceWarning?.level === "low" ||
+                  tempInfo?.severity === "low" ||
+                  outInfo?.severity === "low"
+                ? "low"
+                : "ok"}
+          <button
+            type="button"
+            onclick={() => openSettingsAt("storage")}
+            title={storageSpace.sameVolume && outInfo
+              ? `Temp & Output share volume ${outInfo.resolvedMount}: ${formatDiskBytes(outInfo.availableBytes)} free of ${formatDiskBytes(outInfo.totalBytes)}`
+              : `Temp (${tempInfo?.resolvedMount ?? "?"}): ${tempInfo ? formatDiskBytes(tempInfo.availableBytes) : "?"} free · Output (${outInfo?.resolvedMount ?? "?"}): ${outInfo ? formatDiskBytes(outInfo.availableBytes) : "?"} free`}
+            class={`flex items-center gap-1.5 rounded-full border px-2 py-0.5 font-mono text-[10px] font-semibold transition ${
+              worstSeverity === "critical"
+                ? "border-[#D9415D] bg-[#FFF0F2] text-[#751A2E] hover:bg-[#FFE0E5] dark:border-[#FA637C]/50 dark:bg-[#FA637C]/15 dark:text-[#FF99AA]"
+                : worstSeverity === "low"
+                  ? "border-[#D68D1C] bg-[#FFF7E6] text-[#5E3906] hover:bg-[#FDEBC4] dark:border-[#F8B142]/45 dark:bg-[#F8B142]/15 dark:text-[#FCD283]"
+                  : "border-[#DAD3C7] bg-white text-[#544943] hover:border-[#1FA868] hover:text-[#1A1513] dark:border-[#3A2F2A] dark:bg-[#1A1513] dark:text-[#CFC5BB] dark:hover:border-[#4CDE99]"
+            }`}
+          >
+            <span
+              class={`h-1.5 w-1.5 rounded-full ${
+                worstSeverity === "critical"
+                  ? "bg-[#FA637C]"
+                  : worstSeverity === "low"
+                    ? "bg-[#F8B142]"
+                    : "bg-[#4CDE99]"
+              }`}
+            ></span>
+            {#if storageSpace.sameVolume && outInfo}
+              <span>{formatDiskBytes(outInfo.availableBytes)} free</span>
+            {:else}
+              <span>
+                {#if tempInfo && workflowMode !== "encodeOnly"}
+                  Temp {formatDiskBytes(tempInfo.availableBytes)}
+                {/if}
+                {#if tempInfo && outInfo && workflowMode !== "encodeOnly"}
+                  ·
+                {/if}
+                {#if outInfo}
+                  Out {formatDiskBytes(outInfo.availableBytes)}
+                {/if}
+              </span>
+            {/if}
+          </button>
+        {/if}
       {/if}
     </div>
 
@@ -3279,9 +3749,9 @@
         <button
           type="button"
           onclick={() => openSettingsAt("binaries")}
-          class="flex items-center gap-1.5 rounded-full border border-[#D68D1C] bg-[#FFF7E6] px-2.5 py-1 text-[11px] font-semibold text-[#5E3906] hover:bg-[#FDEBC4]"
+          class="flex items-center gap-1.5 rounded-full border border-[#D68D1C] bg-[#FFF7E6] px-2.5 py-1 text-[11px] font-semibold text-[#5E3906] hover:bg-[#FDEBC4] dark:border-[#F8B142]/45 dark:bg-[#F8B142]/15 dark:text-[#FCD283] dark:hover:bg-[#F8B142]/25"
         >
-          <span class="h-1.5 w-1.5 rounded-full bg-[#DE941E]"></span>
+          <span class="h-1.5 w-1.5 rounded-full bg-[#DE941E] dark:bg-[#F8B142]"></span>
           <span>Setup CLIs</span>
         </button>
       {/if}
@@ -3290,7 +3760,7 @@
         type="button"
         onclick={handleRequestEnqueue}
         disabled={!modeReady || selectedCount === 0 || queueingJobs}
-        class="rounded-md bg-[#11824F] px-3.5 py-1.5 text-xs font-semibold text-white shadow-[0_1px_2px_rgba(17,130,79,0.22)] transition hover:bg-[#0D6E42] disabled:cursor-not-allowed disabled:bg-[#C6BEB1] disabled:text-[#70645D] disabled:shadow-none"
+        class="rounded-md bg-[#11824F] px-3.5 py-1.5 text-xs font-semibold text-white shadow-[0_1px_2px_rgba(17,130,79,0.22)] transition hover:bg-[#0D6E42] disabled:cursor-not-allowed disabled:bg-[#C6BEB1] disabled:text-[#70645D] disabled:shadow-none dark:disabled:bg-[#2C2420] dark:disabled:text-[#6E6058]"
       >
         {#if queueingJobs}
           Queueing...
@@ -3316,12 +3786,12 @@
   <!-- Row 3: Compact IMDb / TVDB / TMDB Metadata Strip -->
   <section
     aria-label="Media titling and naming"
-    class="relative shrink-0 space-y-2 border-b border-[#E6E0D6] bg-white px-5 py-2.5"
+    class="relative shrink-0 space-y-2 border-b border-[#E6E0D6] bg-white px-5 py-2.5 dark:border-[#332925] dark:bg-[#1A1513]"
   >
     <div class="flex flex-wrap items-center gap-2">
       <!-- Movie / TV Toggle -->
       <div
-        class="inline-flex rounded-md border border-[#E6E0D6] bg-[#FAF8F4] p-0.5 text-[11px]"
+        class="inline-flex rounded-md border border-[#E6E0D6] bg-[#FAF8F4] p-0.5 text-[11px] dark:border-[#3A2F2A] dark:bg-[#120E0D]"
         role="group"
         aria-label="Media type"
       >
@@ -3330,8 +3800,8 @@
           onclick={() => (mediaKind = "movie")}
           class={`rounded px-2 py-0.5 font-semibold transition ${
             mediaKind === "movie"
-              ? "bg-white text-[#1A1513] shadow-[0_1px_1px_rgba(0,0,0,0.06)]"
-              : "text-[#70645D] hover:text-[#1A1513]"
+              ? "bg-white text-[#1A1513] shadow-[0_1px_1px_rgba(0,0,0,0.06)] dark:bg-[#2A221F] dark:text-[#F5EFE8]"
+              : "text-[#70645D] hover:text-[#1A1513] dark:text-[#9E9187] dark:hover:text-[#F5EFE8]"
           }`}
         >
           Movie
@@ -3341,8 +3811,8 @@
           onclick={() => (mediaKind = "tvEpisode")}
           class={`rounded px-2 py-0.5 font-semibold transition ${
             mediaKind === "tvEpisode"
-              ? "bg-white text-[#1A1513] shadow-[0_1px_1px_rgba(0,0,0,0.06)]"
-              : "text-[#70645D] hover:text-[#1A1513]"
+              ? "bg-white text-[#1A1513] shadow-[0_1px_1px_rgba(0,0,0,0.06)] dark:bg-[#2A221F] dark:text-[#F5EFE8]"
+              : "text-[#70645D] hover:text-[#1A1513] dark:text-[#9E9187] dark:hover:text-[#F5EFE8]"
           }`}
         >
           TV
@@ -3360,13 +3830,13 @@
           placeholder={mediaKind === "movie"
             ? "Movie title or disc label (e.g. THE_MATRIX_1999_DISC_1)"
             : "TV series title (e.g. Breaking Bad)"}
-          class="min-w-0 flex-1 rounded-md border border-[#DAD3C7] bg-[#F7F4EE] px-2.5 py-1 text-xs text-[#1A1513] placeholder:text-[#A1958E] outline-none focus:border-[#1A1513] focus:bg-white"
+          class="min-w-0 flex-1 rounded-md border border-[#DAD3C7] bg-[#F7F4EE] px-2.5 py-1 text-xs text-[#1A1513] placeholder:text-[#A1958E] outline-none focus:border-[#1A1513] focus:bg-white dark:border-[#3A2F2A] dark:bg-[#221C19] dark:text-[#F5EFE8] dark:placeholder:text-[#7D716A] dark:focus:border-[#4CDE99] dark:focus:bg-[#120E0D]"
         />
         <button
           type="button"
           onclick={() => void handleCleanCurrentTitle()}
           title="Clean raw optical disc volume label"
-          class="rounded-md border border-[#DAD3C7] bg-white px-2 py-1 text-[11px] font-semibold text-[#544943] hover:bg-[#FAF8F4] hover:text-[#1A1513]"
+          class="rounded-md border border-[#DAD3C7] bg-white px-2 py-1 text-[11px] font-semibold text-[#544943] hover:bg-[#FAF8F4] hover:text-[#1A1513] dark:border-[#3A2F2A] dark:bg-[#221C19] dark:text-[#CFC5BB] dark:hover:bg-[#2E2622] dark:hover:text-[#F5EFE8]"
         >
           Clean
         </button>
@@ -3380,13 +3850,13 @@
         inputmode="numeric"
         bind:value={mediaYearInput}
         placeholder="Year"
-        class="w-16 rounded-md border border-[#DAD3C7] bg-[#F7F4EE] px-2 py-1 font-mono text-xs text-[#1A1513] placeholder:text-[#A1958E] outline-none focus:border-[#1A1513] focus:bg-white"
+        class="w-16 rounded-md border border-[#DAD3C7] bg-[#F7F4EE] px-2 py-1 font-mono text-xs text-[#1A1513] placeholder:text-[#A1958E] outline-none focus:border-[#1A1513] focus:bg-white dark:border-[#3A2F2A] dark:bg-[#221C19] dark:text-[#F5EFE8] dark:placeholder:text-[#7D716A] dark:focus:border-[#4CDE99] dark:focus:bg-[#120E0D]"
       />
 
       <!-- TV Season & Start Episode (inline auto-numbering for TV rows) -->
       {#if mediaKind === "tvEpisode"}
         <div class="flex items-center gap-1">
-          <label for="tv-season" class="text-[11px] font-semibold text-[#7D716A]">
+          <label for="tv-season" class="text-[11px] font-semibold text-[#7D716A] dark:text-[#9E9187]">
             S
           </label>
           <input
@@ -3394,11 +3864,11 @@
             type="text"
             inputmode="numeric"
             bind:value={seasonInput}
-            class="w-10 rounded-md border border-[#DAD3C7] bg-[#F7F4EE] px-1.5 py-1 text-center font-mono text-xs text-[#1A1513] outline-none focus:border-[#1A1513] focus:bg-white"
+            class="w-10 rounded-md border border-[#DAD3C7] bg-[#F7F4EE] px-1.5 py-1 text-center font-mono text-xs text-[#1A1513] outline-none focus:border-[#1A1513] focus:bg-white dark:border-[#3A2F2A] dark:bg-[#221C19] dark:text-[#F5EFE8] dark:focus:border-[#4CDE99] dark:focus:bg-[#120E0D]"
           />
           <label
             for="tv-start-ep"
-            class="text-[11px] font-semibold text-[#7D716A]"
+            class="text-[11px] font-semibold text-[#7D716A] dark:text-[#9E9187]"
           >
             E
           </label>
@@ -3408,10 +3878,10 @@
             inputmode="numeric"
             bind:value={startEpisodeInput}
             title="Starting episode number (rows auto-increment)"
-            class="w-10 rounded-md border border-[#DAD3C7] bg-[#F7F4EE] px-1.5 py-1 text-center font-mono text-xs text-[#1A1513] outline-none focus:border-[#1A1513] focus:bg-white"
+            class="w-10 rounded-md border border-[#DAD3C7] bg-[#F7F4EE] px-1.5 py-1 text-center font-mono text-xs text-[#1A1513] outline-none focus:border-[#1A1513] focus:bg-white dark:border-[#3A2F2A] dark:bg-[#221C19] dark:text-[#F5EFE8] dark:focus:border-[#4CDE99] dark:focus:bg-[#120E0D]"
           />
           {#if !isLocalMode && inspectedTitleId !== null}
-            <span class="font-mono text-[10px] text-[#7D716A]">-E</span>
+            <span class="font-mono text-[10px] text-[#7D716A] dark:text-[#9E9187]">-E</span>
             <input
               type="text"
               inputmode="numeric"
@@ -3421,7 +3891,7 @@
               title="Optional end episode for multi-part disc tracks (e.g. S01E01-E02)"
               onchange={(e) =>
                 updateInspectedDiscEpisodeEnd(e.currentTarget.value)}
-              class="w-9 rounded-md border border-[#DAD3C7] bg-[#F7F4EE] px-1 py-1 text-center font-mono text-xs text-[#1A1513] placeholder:text-[#A1958E] outline-none focus:border-[#1A1513] focus:bg-white"
+              class="w-9 rounded-md border border-[#DAD3C7] bg-[#F7F4EE] px-1 py-1 text-center font-mono text-xs text-[#1A1513] placeholder:text-[#A1958E] outline-none focus:border-[#1A1513] focus:bg-white dark:border-[#3A2F2A] dark:bg-[#221C19] dark:text-[#F5EFE8] dark:placeholder:text-[#7D716A] dark:focus:border-[#4CDE99] dark:focus:bg-[#120E0D]"
             />
           {/if}
           {#if isLocalMode && inspectedLocalItem && inspectedLocalItem.mediaKind === "tvEpisode"}
@@ -3444,7 +3914,7 @@
                   }
                 }}
                 title="Pick the exact official episode from the show catalog for the selected row"
-                class="max-w-[220px] truncate rounded-md border border-[#9CD9F5] bg-[#E6F6FD] px-2 py-1 text-[11px] font-semibold text-[#0E5678] outline-none focus:border-[#11824F]"
+                class="max-w-[220px] truncate rounded-md border border-[#9CD9F5] bg-[#E6F6FD] px-2 py-1 text-[11px] font-semibold text-[#0E5678] outline-none focus:border-[#11824F] dark:border-[#5BC0EB]/40 dark:bg-[#5BC0EB]/15 dark:text-[#8BD7F8] dark:focus:border-[#4CDE99]"
               >
                 <option value="">Pick official episode...</option>
                 {#each activeEpisodeCatalog as ep (`${ep.season}:${ep.episode}`)}
@@ -3470,7 +3940,7 @@
                   }
                 }}
                 placeholder="Episode name"
-                class="w-36 rounded-md border border-[#DAD3C7] bg-[#F7F4EE] px-2 py-1 text-xs text-[#1A1513] placeholder:text-[#A1958E] outline-none focus:border-[#1A1513] focus:bg-white"
+                class="w-36 rounded-md border border-[#DAD3C7] bg-[#F7F4EE] px-2 py-1 text-xs text-[#1A1513] placeholder:text-[#A1958E] outline-none focus:border-[#1A1513] focus:bg-white dark:border-[#3A2F2A] dark:bg-[#221C19] dark:text-[#F5EFE8] dark:placeholder:text-[#7D716A] dark:focus:border-[#4CDE99] dark:focus:bg-[#120E0D]"
               />
             {/if}
           {/if}
@@ -3487,8 +3957,8 @@
           title="Tag selected track/file as a Plex/Jellyfin bonus extra (-featurette, -deleted, Specials)"
           class={`rounded-md border px-2 py-1 text-[11px] font-semibold outline-none transition ${
             activeInspectedExtraType
-              ? "border-[#F8B4C0] bg-[#FFF0F2] text-[#751A2E]"
-              : "border-[#DAD3C7] bg-[#FAF8F4] text-[#544943] hover:text-[#1A1513]"
+              ? "border-[#F8B4C0] bg-[#FFF0F2] text-[#751A2E] dark:border-[#FA637C]/45 dark:bg-[#FA637C]/15 dark:text-[#FF99AA]"
+              : "border-[#DAD3C7] bg-[#FAF8F4] text-[#544943] hover:text-[#1A1513] dark:border-[#3A2F2A] dark:bg-[#221C19] dark:text-[#CFC5BB] dark:hover:text-[#F5EFE8]"
           }`}
         >
           <option value="">Main Feature / Ep</option>
@@ -3505,7 +3975,7 @@
         type="text"
         bind:value={imdbId}
         placeholder="IMDb tt..."
-        class="w-28 rounded-md border border-[#DAD3C7] bg-[#F7F4EE] px-2 py-1 font-mono text-[11px] text-[#1A1513] placeholder:text-[#A1958E] outline-none focus:border-[#1A1513] focus:bg-white"
+        class="w-28 rounded-md border border-[#DAD3C7] bg-[#F7F4EE] px-2 py-1 font-mono text-[11px] text-[#1A1513] placeholder:text-[#A1958E] outline-none focus:border-[#1A1513] focus:bg-white dark:border-[#3A2F2A] dark:bg-[#221C19] dark:text-[#F5EFE8] dark:placeholder:text-[#7D716A] dark:focus:border-[#4CDE99] dark:focus:bg-[#120E0D]"
       />
 
       <label for="tvdb-id" class="sr-only">TVDB ID or URL</label>
@@ -3514,7 +3984,7 @@
         type="text"
         bind:value={tvdbId}
         placeholder="TVDB ID"
-        class="w-24 rounded-md border border-[#DAD3C7] bg-[#F7F4EE] px-2 py-1 font-mono text-[11px] text-[#1A1513] placeholder:text-[#A1958E] outline-none focus:border-[#1A1513] focus:bg-white"
+        class="w-24 rounded-md border border-[#DAD3C7] bg-[#F7F4EE] px-2 py-1 font-mono text-[11px] text-[#1A1513] placeholder:text-[#A1958E] outline-none focus:border-[#1A1513] focus:bg-white dark:border-[#3A2F2A] dark:bg-[#221C19] dark:text-[#F5EFE8] dark:placeholder:text-[#7D716A] dark:focus:border-[#4CDE99] dark:focus:bg-[#120E0D]"
       />
 
       <label for="tmdb-id" class="sr-only">TMDB ID or URL</label>
@@ -3523,7 +3993,7 @@
         type="text"
         bind:value={tmdbId}
         placeholder="TMDB ID"
-        class="w-24 rounded-md border border-[#DAD3C7] bg-[#F7F4EE] px-2 py-1 font-mono text-[11px] text-[#1A1513] placeholder:text-[#A1958E] outline-none focus:border-[#1A1513] focus:bg-white"
+        class="w-24 rounded-md border border-[#DAD3C7] bg-[#F7F4EE] px-2 py-1 font-mono text-[11px] text-[#1A1513] placeholder:text-[#A1958E] outline-none focus:border-[#1A1513] focus:bg-white dark:border-[#3A2F2A] dark:bg-[#221C19] dark:text-[#F5EFE8] dark:placeholder:text-[#7D716A] dark:focus:border-[#4CDE99] dark:focus:bg-[#120E0D]"
       />
 
       <!-- Provider Lookup -->
@@ -3532,7 +4002,7 @@
         <select
           id="metadata-provider"
           bind:value={metadataProvider}
-          class="rounded-md border border-[#DAD3C7] bg-[#FAF8F4] px-2 py-1 text-[11px] font-semibold text-[#1A1513] outline-none focus:border-[#1A1513]"
+          class="rounded-md border border-[#DAD3C7] bg-[#FAF8F4] px-2 py-1 text-[11px] font-semibold text-[#1A1513] outline-none focus:border-[#1A1513] dark:border-[#3A2F2A] dark:bg-[#221C19] dark:text-[#F5EFE8] dark:focus:border-[#4CDE99]"
         >
           <option value="imdb">IMDb</option>
           <option value="tvdb">TVDB</option>
@@ -3550,24 +4020,24 @@
       </div>
     </div>
 
-    <!-- Live Clay Token Chips + Output Path Preview Line -->
+    <!-- Live Token Chips + Output Path Preview Line -->
     <div class="flex flex-wrap items-center justify-between gap-2 text-[11px]">
       <div class="flex min-w-0 flex-wrap items-center gap-1.5">
         <span
-          class="text-[10px] font-bold uppercase tracking-[0.08em] text-[#7D716A]"
+          class="text-[10px] font-bold uppercase tracking-[0.08em] text-[#7D716A] dark:text-[#9E9187]"
         >
           Naming:
         </span>
         {#each activeTokenChips as chip, i (`${chip}-${i}`)}
           <span
-            class="inline-flex items-center rounded border border-[#9CD9F5] bg-[#E6F6FD] px-1.5 py-0.5 font-mono text-[10px] font-medium text-[#0E5678]"
+            class="inline-flex items-center rounded border border-[#9CD9F5] bg-[#E6F6FD] px-1.5 py-0.5 font-mono text-[10px] font-medium text-[#0E5678] dark:border-[#5BC0EB]/40 dark:bg-[#5BC0EB]/15 dark:text-[#8BD7F8]"
           >
             {chip}
           </span>
         {/each}
-        <span class="text-[#B6AEA2]">→</span>
+        <span class="text-[#B6AEA2] dark:text-[#6E6058]">→</span>
         <code
-          class="truncate font-mono text-[11px] text-[#3F3530]"
+          class="truncate font-mono text-[11px] text-[#3F3530] dark:text-[#CFC5BB]"
           title={outputFilenamePreview}
         >
           {outputFilenamePreview}
@@ -3579,7 +4049,7 @@
           <button
             type="button"
             onclick={() => openSettingsAt("metadata")}
-            class="rounded border border-[#E8BF6E] bg-[#FFF7E6] px-2 py-0.5 text-[10px] font-semibold text-[#5E3906] hover:bg-[#FDEBC4]"
+            class="rounded border border-[#E8BF6E] bg-[#FFF7E6] px-2 py-0.5 text-[10px] font-semibold text-[#5E3906] hover:bg-[#FDEBC4] dark:border-[#F8B142]/45 dark:bg-[#F8B142]/15 dark:text-[#FCD283]"
           >
             {metadataLookupStatus}
           </button>
@@ -3589,7 +4059,7 @@
           id="naming-convention"
           value={namingConvention}
           onchange={handleNamingConventionChange}
-          class="rounded border border-[#DAD3C7] bg-[#FAF8F4] px-2 py-0.5 text-[10px] font-semibold text-[#1A1513]"
+          class="rounded border border-[#DAD3C7] bg-[#FAF8F4] px-2 py-0.5 text-[10px] font-semibold text-[#1A1513] dark:border-[#3A2F2A] dark:bg-[#221C19] dark:text-[#F5EFE8]"
         >
           <option value="plex">Plex {"{imdb/tvdb}"}</option>
           <option value="jellyfin">Jellyfin [imdbid/tvdbid]</option>
@@ -3601,38 +4071,38 @@
     <!-- Live Search Results Popover -->
     {#if searchResults.length > 0}
       <div
-        class="absolute top-full right-5 left-5 z-30 mt-1 max-h-80 overflow-y-auto rounded-xl border border-[#DAD3C7] bg-white shadow-[0_18px_45px_rgba(26,21,19,0.14)]"
+        class="absolute top-full right-5 left-5 z-30 mt-1 max-h-80 overflow-y-auto rounded-xl border border-[#DAD3C7] bg-white shadow-[0_18px_45px_rgba(26,21,19,0.14)] dark:border-[#3A2F2A] dark:bg-[#1A1513] dark:shadow-[0_18px_45px_rgba(0,0,0,0.55)]"
       >
         <div
-          class="flex items-center justify-between border-b border-[#EDE7DE] bg-[#FAF8F4] px-3.5 py-2 text-[11px]"
+          class="flex items-center justify-between border-b border-[#EDE7DE] bg-[#FAF8F4] px-3.5 py-2 text-[11px] dark:border-[#2B221E] dark:bg-[#120E0D]"
         >
-          <span class="font-semibold text-[#1A1513]">
+          <span class="font-semibold text-[#1A1513] dark:text-[#F5EFE8]">
             Select a match ({searchResults.length})
           </span>
           <button
             type="button"
             onclick={() => (searchResults = [])}
-            class="font-medium text-[#7D716A] hover:text-[#1A1513]"
+            class="font-medium text-[#7D716A] hover:text-[#1A1513] dark:text-[#9E9187] dark:hover:text-[#F5EFE8]"
           >
             Dismiss
           </button>
         </div>
-        <div class="divide-y divide-[#EDE7DD]">
+        <div class="divide-y divide-[#EDE7DD] dark:divide-[#2B221E]">
           {#each searchResults as item, idx (`${item.title}-${item.ids.imdbId ?? item.ids.tvdbId ?? item.ids.tmdbId ?? idx}`)}
             <button
               type="button"
               onclick={() => void applyMetadataResult(item)}
-              class="flex w-full items-start gap-3 px-3.5 py-2.5 text-left transition hover:bg-[#EEFCF5]"
+              class="flex w-full items-start gap-3 px-3.5 py-2.5 text-left transition hover:bg-[#EEFCF5] dark:hover:bg-[#4CDE99]/10"
             >
               {#if item.posterUrl}
                 <img
                   src={item.posterUrl}
                   alt={item.title}
-                  class="h-14 w-10 shrink-0 rounded border border-[#E6E0D6] object-cover"
+                  class="h-14 w-10 shrink-0 rounded border border-[#E6E0D6] object-cover dark:border-[#332925]"
                 />
               {:else}
                 <div
-                  class="flex h-14 w-10 shrink-0 items-center justify-center rounded border border-[#E6E0D6] bg-[#FAF8F4] font-mono text-[10px] text-[#9E928B]"
+                  class="flex h-14 w-10 shrink-0 items-center justify-center rounded border border-[#E6E0D6] bg-[#FAF8F4] font-mono text-[10px] text-[#9E928B] dark:border-[#332925] dark:bg-[#221C19] dark:text-[#8E8178]"
                 >
                   {item.kind === "movie" ? "MOV" : "TV"}
                 </div>
@@ -3640,43 +4110,43 @@
 
               <div class="min-w-0 flex-1 space-y-1">
                 <div class="flex flex-wrap items-center gap-1.5">
-                  <span class="text-xs font-bold text-[#1A1513]">
+                  <span class="text-xs font-bold text-[#1A1513] dark:text-[#F5EFE8]">
                     {item.title}
                   </span>
                   {#if item.year}
-                    <span class="font-mono text-[11px] text-[#61554F]">
+                    <span class="font-mono text-[11px] text-[#61554F] dark:text-[#B8ABA0]">
                       ({item.year})
                     </span>
                   {/if}
                   <span
-                    class="rounded-full border border-[#E6E0D6] bg-[#FAF8F4] px-1.5 py-0.5 text-[9px] font-bold uppercase text-[#61554F]"
+                    class="rounded-full border border-[#E6E0D6] bg-[#FAF8F4] px-1.5 py-0.5 text-[9px] font-bold uppercase text-[#61554F] dark:border-[#3A2F2A] dark:bg-[#221C19] dark:text-[#CFC5BB]"
                   >
                     {item.kind === "movie" ? "Movie" : "TV"}
                   </span>
                   {#if item.ids.imdbId}
                     <span
-                      class="rounded border border-[#9CD9F5] bg-[#E6F6FD] px-1.5 py-0.5 font-mono text-[10px] font-medium text-[#0E5678]"
+                      class="rounded border border-[#9CD9F5] bg-[#E6F6FD] px-1.5 py-0.5 font-mono text-[10px] font-medium text-[#0E5678] dark:border-[#5BC0EB]/40 dark:bg-[#5BC0EB]/15 dark:text-[#8BD7F8]"
                     >
                       imdb:{item.ids.imdbId}
                     </span>
                   {/if}
                   {#if item.ids.tvdbId}
                     <span
-                      class="rounded border border-[#9BE5C1] bg-[#E6FBF1] px-1.5 py-0.5 font-mono text-[10px] font-medium text-[#0E4D31]"
+                      class="rounded border border-[#9BE5C1] bg-[#E6FBF1] px-1.5 py-0.5 font-mono text-[10px] font-medium text-[#0E4D31] dark:border-[#4CDE99]/40 dark:bg-[#4CDE99]/15 dark:text-[#7AF0B8]"
                     >
                       tvdb:{item.ids.tvdbId}
                     </span>
                   {/if}
                   {#if item.ids.tmdbId}
                     <span
-                      class="rounded border border-[#F0CB82] bg-[#FDF3DC] px-1.5 py-0.5 font-mono text-[10px] font-medium text-[#563406]"
+                      class="rounded border border-[#F0CB82] bg-[#FDF3DC] px-1.5 py-0.5 font-mono text-[10px] font-medium text-[#563406] dark:border-[#F8B142]/40 dark:bg-[#F8B142]/15 dark:text-[#FCD283]"
                     >
                       tmdb:{item.ids.tmdbId}
                     </span>
                   {/if}
                 </div>
                 {#if item.overview}
-                  <p class="line-clamp-2 text-[11px] leading-snug text-[#70645D]">
+                  <p class="line-clamp-2 text-[11px] leading-snug text-[#70645D] dark:text-[#A69990]">
                     {item.overview}
                   </p>
                 {/if}
@@ -3690,27 +4160,74 @@
 
   <!-- Row 4: 2/3 Title Table + Toggleable 1/3 Right Preview Drawer -->
   <div class="flex min-h-0 flex-1 overflow-hidden">
-    <main class="flex min-w-0 flex-[2_1_0%] flex-col overflow-hidden bg-white">
+    <main
+      class="flex min-w-0 flex-[2_1_0%] flex-col overflow-hidden bg-white dark:bg-[#1A1513]"
+    >
       {#if queueActionError}
         <div
-          class="flex shrink-0 items-center justify-between gap-3 border-b border-red-200 bg-red-50 px-5 py-2 text-xs text-red-700"
+          class="flex shrink-0 items-center justify-between gap-3 border-b border-red-200 bg-red-50 px-5 py-2 text-xs text-red-700 dark:border-red-500/40 dark:bg-red-500/15 dark:text-red-300"
         >
           <span class="truncate font-mono text-[11px]">{queueActionError}</span>
           <button
             type="button"
             onclick={() => (queueActionError = null)}
-            class="shrink-0 font-semibold text-red-700 hover:underline"
+            class="shrink-0 font-semibold text-red-700 hover:underline dark:text-red-300"
           >
             Dismiss
           </button>
         </div>
       {/if}
+
+      {#if notificationBanner}
+        <div
+          class={`flex shrink-0 items-center justify-between gap-3 border-b px-5 py-1.5 text-xs ${
+            notificationBanner.kind === "success"
+              ? "border-[#9BE5C1] bg-[#E6FBF1] text-[#0E4D31] dark:border-[#4CDE99]/40 dark:bg-[#4CDE99]/15 dark:text-[#7AF0B8]"
+              : notificationBanner.kind === "warn"
+                ? "border-[#E8BF6E] bg-[#FFF7E6] text-[#5E3906] dark:border-[#F8B142]/45 dark:bg-[#F8B142]/15 dark:text-[#FCD283]"
+                : "border-[#9CD9F5] bg-[#E6F6FD] text-[#0E5678] dark:border-[#5BC0EB]/40 dark:bg-[#5BC0EB]/15 dark:text-[#8BD7F8]"
+          }`}
+        >
+          <span class="truncate">
+            <strong>{notificationBanner.title}:</strong> {notificationBanner.body}
+          </span>
+          <button
+            type="button"
+            onclick={() => (notificationBanner = null)}
+            class="shrink-0 text-[11px] font-semibold hover:underline"
+          >
+            Dismiss
+          </button>
+        </div>
+      {/if}
+
+      {#if activeDiskSpaceWarning}
+        <div
+          class={`flex shrink-0 items-center justify-between gap-3 border-b px-5 py-1.5 text-xs ${
+            activeDiskSpaceWarning.level === "critical"
+              ? "border-[#F8B4C0] bg-[#FFF0F2] text-[#751A2E] dark:border-[#FA637C]/45 dark:bg-[#FA637C]/15 dark:text-[#FF99AA]"
+              : "border-[#E8BF6E] bg-[#FFF7E6] text-[#5E3906] dark:border-[#F8B142]/45 dark:bg-[#F8B142]/15 dark:text-[#FCD283]"
+          }`}
+        >
+          <span class="truncate font-medium">
+            ⚠ {activeDiskSpaceWarning.message}
+          </span>
+          <button
+            type="button"
+            onclick={() => openSettingsAt("storage")}
+            class="shrink-0 rounded border border-current/30 bg-white/60 px-2 py-0.5 text-[10px] font-semibold transition hover:bg-white dark:bg-black/20 dark:hover:bg-black/40"
+          >
+            Storage Settings
+          </button>
+        </div>
+      {/if}
+
       {#if lastOrganizeResult && isOrganizeMode}
         <div
-          class="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-[#9BE5C1] bg-[#E6FBF1] px-5 py-2 text-xs text-[#0E4D31]"
+          class="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-[#9BE5C1] bg-[#E6FBF1] px-5 py-2 text-xs text-[#0E4D31] dark:border-[#4CDE99]/40 dark:bg-[#4CDE99]/15 dark:text-[#7AF0B8]"
         >
           <div class="flex min-w-0 items-center gap-2">
-            <span class="h-2 w-2 shrink-0 rounded-full bg-[#1FA868]"></span>
+            <span class="h-2 w-2 shrink-0 rounded-full bg-[#1FA868] dark:bg-[#4CDE99]"></span>
             <span class="font-semibold">{lastOrganizeResult.statusMessage}</span>
           </div>
           <div class="flex shrink-0 items-center gap-2">
@@ -3722,7 +4239,7 @@
                     void handleRevealPath(sourceFolderPath);
                   }
                 }}
-                class="rounded border border-[#1FA868] bg-white px-2 py-0.5 text-[11px] font-semibold text-[#0E4D31] hover:bg-[#CEF6E3]"
+                class="rounded border border-[#1FA868] bg-white px-2 py-0.5 text-[11px] font-semibold text-[#0E4D31] hover:bg-[#CEF6E3] dark:border-[#4CDE99]/40 dark:bg-[#1A1513] dark:text-[#7AF0B8] dark:hover:bg-[#4CDE99]/20"
               >
                 Open Folder
               </button>
@@ -3730,7 +4247,7 @@
                 type="button"
                 onclick={() => void rescanConnectedFolder()}
                 disabled={identifyingFolder}
-                class="rounded border border-[#9BE5C1] bg-white px-2 py-0.5 text-[11px] font-semibold text-[#0E4D31] hover:bg-[#CEF6E3] disabled:opacity-50"
+                class="rounded border border-[#9BE5C1] bg-white px-2 py-0.5 text-[11px] font-semibold text-[#0E4D31] hover:bg-[#CEF6E3] disabled:opacity-50 dark:border-[#4CDE99]/40 dark:bg-[#1A1513] dark:text-[#7AF0B8] dark:hover:bg-[#4CDE99]/20"
               >
                 Rescan Folder
               </button>
@@ -3740,7 +4257,7 @@
                 type="button"
                 onclick={() => void handleUndoLastOrganize()}
                 disabled={undoingOrganize}
-                class="rounded border border-[#D68D1C] bg-[#FFF7E6] px-2.5 py-0.5 text-[11px] font-semibold text-[#5E3906] hover:bg-[#FDEBC4] disabled:opacity-50"
+                class="rounded border border-[#D68D1C] bg-[#FFF7E6] px-2.5 py-0.5 text-[11px] font-semibold text-[#5E3906] hover:bg-[#FDEBC4] disabled:opacity-50 dark:border-[#F8B142]/45 dark:bg-[#F8B142]/15 dark:text-[#FCD283]"
               >
                 {undoingOrganize ? "Undoing..." : "↩ Undo Last Organize"}
               </button>
@@ -3748,7 +4265,7 @@
             <button
               type="button"
               onclick={() => (lastOrganizeResult = null)}
-              class="text-[11px] font-semibold text-[#0E4D31]/80 hover:text-[#0E4D31]"
+              class="text-[11px] font-semibold opacity-80 hover:opacity-100"
             >
               Dismiss
             </button>
@@ -3756,26 +4273,28 @@
         </div>
       {:else if organizeUndoBanner && isOrganizeMode}
         <div
-          class="flex shrink-0 items-center justify-between gap-2 border-b border-[#9CD9F5] bg-[#E6F6FD] px-5 py-2 text-xs text-[#0E5678]"
+          class="flex shrink-0 items-center justify-between gap-2 border-b border-[#9CD9F5] bg-[#E6F6FD] px-5 py-2 text-xs text-[#0E5678] dark:border-[#5BC0EB]/40 dark:bg-[#5BC0EB]/15 dark:text-[#8BD7F8]"
         >
           <span class="font-semibold">↩ {organizeUndoBanner}</span>
           <button
             type="button"
             onclick={() => (organizeUndoBanner = null)}
-            class="text-[11px] font-semibold text-[#0E5678] hover:underline"
+            class="text-[11px] font-semibold hover:underline"
           >
             Dismiss
           </button>
         </div>
       {/if}
+
+      <!-- Local Mode Batch Summary & Bulk Actions Bar -->
       {#if isLocalMode && (folderIdentifyStatus || localVideoItems.length > 0)}
         <div
-          class="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-[#E6E0D6] bg-[#F7F4EE] px-5 py-1.5 text-[11px]"
+          class="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-[#E6E0D6] bg-[#F7F4EE] px-5 py-1.5 text-[11px] dark:border-[#332925] dark:bg-[#221C19]"
         >
           <div class="flex min-w-0 flex-wrap items-center gap-2">
             {#if localVideoItems.length > 0}
               <span
-                class="rounded-full border border-[#E6E0D6] bg-white px-2 py-0.5 font-mono text-[10px] font-semibold text-[#1A1513]"
+                class="rounded-full border border-[#E6E0D6] bg-white px-2 py-0.5 font-mono text-[10px] font-semibold text-[#1A1513] dark:border-[#3A2F2A] dark:bg-[#1A1513] dark:text-[#F5EFE8]"
               >
                 {localVideoItems.length} file{localVideoItems.length === 1 ? "" : "s"}
                 {#if totalLocalSizeBytes > 0}
@@ -3784,17 +4303,17 @@
               </span>
             {/if}
             {#if folderIdentifyStatus}
-              <span class="truncate font-medium text-[#0E4D31]">
+              <span class="truncate font-medium text-[#0E4D31] dark:text-[#7AF0B8]">
                 {folderIdentifyStatus}
               </span>
             {:else if isOrganizeMode}
-              <span class="text-[#61554F]">
-                Lookup &amp; reorganize in place · preserves original extensions &amp; companion <span class="font-mono text-[#1A1513]">.srt/.nfo</span> sidecars
+              <span class="text-[#61554F] dark:text-[#B8ABA0]">
+                Lookup &amp; reorganize in place · preserves original extensions &amp; companion <span class="font-mono text-[#1A1513] dark:text-[#F5EFE8]">.srt/.nfo</span> sidecars
               </span>
             {:else if activeQualityProfile}
-              <span class="text-[#61554F]">
+              <span class="text-[#61554F] dark:text-[#B8ABA0]">
                 All checked files encode uniformly to
-                <span class="font-mono font-semibold text-[#1A1513]">
+                <span class="font-mono font-semibold text-[#1A1513] dark:text-[#F5EFE8]">
                   {shortResolutionLabel(activeQualityProfile.resolution)} {activeQualityProfile.delivery} · {shortEncoderLabel(activeQualityProfile.encoder)} · .{outputContainer}
                 </span>
               </span>
@@ -3804,7 +4323,7 @@
           <div class="flex shrink-0 items-center gap-1.5">
             {#if localVideoItems.length > 0}
               <div
-                class="inline-flex rounded border border-[#DAD3C7] bg-white p-0.5 text-[10px]"
+                class="inline-flex rounded border border-[#DAD3C7] bg-white p-0.5 text-[10px] dark:border-[#3A2F2A] dark:bg-[#120E0D]"
                 role="group"
                 aria-label="Set media type for all loaded files"
               >
@@ -3815,7 +4334,7 @@
                   class={`rounded px-1.5 py-0.5 font-semibold transition ${
                     activeBatchKind === "tvSeries"
                       ? "bg-[#5BC0EB] text-[#1A1513]"
-                      : "text-[#61554F] hover:text-[#1A1513]"
+                      : "text-[#61554F] hover:text-[#1A1513] dark:text-[#A69990] dark:hover:text-[#F5EFE8]"
                   }`}
                 >
                   All TV
@@ -3827,7 +4346,7 @@
                   class={`rounded px-1.5 py-0.5 font-semibold transition ${
                     activeBatchKind === "movies"
                       ? "bg-[#4CDE99] text-[#1A1513]"
-                      : "text-[#61554F] hover:text-[#1A1513]"
+                      : "text-[#61554F] hover:text-[#1A1513] dark:text-[#A69990] dark:hover:text-[#F5EFE8]"
                   }`}
                 >
                   All Movies
@@ -3836,14 +4355,14 @@
             {/if}
             {#if detectedShows.length > 1}
               <span
-                class="rounded-full border border-[#9BE5C1] bg-[#E6FBF1] px-2 py-0.5 font-mono text-[10px] font-semibold text-[#0E4D31]"
+                class="rounded-full border border-[#9BE5C1] bg-[#E6FBF1] px-2 py-0.5 font-mono text-[10px] font-semibold text-[#0E4D31] dark:border-[#4CDE99]/40 dark:bg-[#4CDE99]/15 dark:text-[#7AF0B8]"
               >
                 {detectedShows.length} shows
               </span>
             {/if}
             {#if mediaKind === "tvEpisode" && detectedBatchSeasons.length > 1}
               <span
-                class="rounded-full border border-[#9CD9F5] bg-[#E6F6FD] px-2 py-0.5 font-mono text-[10px] font-semibold text-[#0E5678]"
+                class="rounded-full border border-[#9CD9F5] bg-[#E6F6FD] px-2 py-0.5 font-mono text-[10px] font-semibold text-[#0E5678] dark:border-[#5BC0EB]/40 dark:bg-[#5BC0EB]/15 dark:text-[#8BD7F8]"
               >
                 {detectedBatchSeasons.length} seasons ({detectedBatchSeasons
                   .map((s) => (s === 0 ? "Specials" : `S${String(s).padStart(2, "0")}`))
@@ -3854,7 +4373,7 @@
               <button
                 type="button"
                 onclick={() => (searchResults = folderShowCandidates)}
-                class="rounded border border-[#9CD9F5] bg-[#E6F6FD] px-2 py-0.5 text-[10px] font-semibold text-[#0E5678] hover:bg-[#D1EFFB]"
+                class="rounded border border-[#9CD9F5] bg-[#E6F6FD] px-2 py-0.5 text-[10px] font-semibold text-[#0E5678] hover:bg-[#D1EFFB] dark:border-[#5BC0EB]/40 dark:bg-[#5BC0EB]/15 dark:text-[#8BD7F8]"
               >
                 Switch Show ({folderShowCandidates.length})
               </button>
@@ -3863,7 +4382,7 @@
               <button
                 type="button"
                 onclick={clearLocalVideoItems}
-                class="rounded border border-[#E6E0D6] bg-white px-2 py-0.5 text-[10px] font-medium text-[#70645D] hover:text-red-600"
+                class="rounded border border-[#E6E0D6] bg-white px-2 py-0.5 text-[10px] font-medium text-[#70645D] hover:text-red-600 dark:border-[#3A2F2A] dark:bg-[#1A1513] dark:text-[#A69990] dark:hover:text-red-400"
               >
                 Clear List
               </button>
@@ -3871,10 +4390,95 @@
           </div>
         </div>
       {/if}
+
+      <!-- Smart Disc Title Filters Bar (Rip Only / Rip + Encode) -->
+      {#if !isLocalMode && titles.length > 0}
+        <div
+          class="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-[#E6E0D6] bg-[#F7F4EE] px-5 py-1.5 text-[11px] dark:border-[#332925] dark:bg-[#221C19]"
+        >
+          <div class="flex flex-wrap items-center gap-1.5">
+            <span
+              class="rounded-full border border-[#E6E0D6] bg-white px-2 py-0.5 font-mono text-[10px] font-semibold text-[#1A1513] dark:border-[#3A2F2A] dark:bg-[#1A1513] dark:text-[#F5EFE8]"
+            >
+              {titles.length} title{titles.length === 1 ? "" : "s"} · {checkedTitleIds.length} selected
+              {#if selectedDiscBytes > 0}
+                · {formatBytesHuman(selectedDiscBytes)}
+              {/if}
+            </span>
+
+            <button
+              type="button"
+              onclick={selectMainFeatureTitle}
+              disabled={discAnalysis.mainFeatureTitleId === null}
+              title="Select only the longest title on the disc (Main Feature)"
+              class={`rounded-md border px-2 py-0.5 text-[10px] font-semibold transition disabled:opacity-40 ${
+                checkedTitleIds.length === 1 &&
+                checkedTitleIds[0] === discAnalysis.mainFeatureTitleId
+                  ? "border-[#1FA868] bg-[#4CDE99] text-[#1A1513]"
+                  : "border-[#9BE5C1] bg-[#E6FBF1] text-[#0E4D31] hover:bg-[#CEF6E3] dark:border-[#4CDE99]/40 dark:bg-[#4CDE99]/15 dark:text-[#7AF0B8] dark:hover:bg-[#4CDE99]/25"
+              }`}
+            >
+              ★ Select Main Feature
+            </button>
+
+            <button
+              type="button"
+              onclick={selectDiscEpisodeTitles}
+              disabled={discAnalysis.episodeTitleIds.length === 0}
+              title="Select all titles between 20 and 65 minutes (ideal for TV box-set discs)"
+              class={`rounded-md border px-2 py-0.5 text-[10px] font-semibold transition disabled:cursor-not-allowed disabled:opacity-40 ${
+                discAnalysis.episodeTitleIds.length > 0 &&
+                checkedTitleIds.length === discAnalysis.episodeTitleIds.length &&
+                discAnalysis.episodeTitleIds.every((id) =>
+                  checkedTitleIds.includes(id),
+                )
+                  ? "border-[#1C8EC0] bg-[#5BC0EB] text-[#1A1513]"
+                  : "border-[#9CD9F5] bg-[#E6F6FD] text-[#0E5678] hover:bg-[#D1EFFB] dark:border-[#5BC0EB]/40 dark:bg-[#5BC0EB]/15 dark:text-[#8BD7F8] dark:hover:bg-[#5BC0EB]/25"
+              }`}
+            >
+              Select Episodes (20–65m) · {discAnalysis.episodeTitleIds.length}
+            </button>
+
+            {#if checkedTitleIds.length > 0}
+              <button
+                type="button"
+                onclick={selectNoDiscTitles}
+                class="rounded border border-[#DAD3C7] bg-white px-2 py-0.5 text-[10px] font-medium text-[#61554F] hover:text-[#1A1513] dark:border-[#3A2F2A] dark:bg-[#1A1513] dark:text-[#A69990] dark:hover:text-[#F5EFE8]"
+              >
+                None
+              </button>
+            {/if}
+          </div>
+
+          {#if discAnalysis.duplicateTitleCount > 0}
+            <div class="flex flex-wrap items-center gap-1.5">
+              <span
+                title={discAnalysis.hasObfuscatedPattern
+                  ? "Multiple feature-length titles share identical durations — common on obfuscated ScreenPass Blu-rays. Inspect playlist (.mpls) filenames before ripping."
+                  : "Multiple titles on this disc share nearly identical runtimes."}
+                class="inline-flex items-center gap-1 rounded-full border border-[#D68D1C] bg-[#FFF7E6] px-2 py-0.5 font-mono text-[10px] font-bold text-[#5E3906] dark:border-[#F8B142]/45 dark:bg-[#F8B142]/15 dark:text-[#FCD283]"
+              >
+                ⚠ {discAnalysis.duplicateTitleCount} dup-duration{discAnalysis.hasObfuscatedPattern ? " (obfuscated Blu-ray?)" : ""}
+              </span>
+              {#if hasCheckedDuplicates}
+                <button
+                  type="button"
+                  onclick={dedupeCheckedDiscTitles}
+                  title="Keep only the highest-priority title for each duplicate duration"
+                  class="rounded border border-[#D68D1C] bg-white px-2 py-0.5 text-[10px] font-semibold text-[#5E3906] hover:bg-[#FFF7E6] dark:border-[#F8B142]/45 dark:bg-[#1A1513] dark:text-[#FCD283] dark:hover:bg-[#F8B142]/20"
+                >
+                  Keep 1 / Duration
+                </button>
+              {/if}
+            </div>
+          {/if}
+        </div>
+      {/if}
+
       <!-- Table Header -->
       {#if isLocalMode}
         <div
-          class="grid shrink-0 grid-cols-12 items-center border-b border-[#E6E0D6] bg-[#FAF8F4] px-5 py-2 text-[10px] font-bold uppercase tracking-[0.08em] text-[#7D716A]"
+          class="grid shrink-0 grid-cols-12 items-center border-b border-[#E6E0D6] bg-[#FAF8F4] px-5 py-2 text-[10px] font-bold uppercase tracking-[0.08em] text-[#7D716A] dark:border-[#332925] dark:bg-[#120E0D] dark:text-[#9E9187]"
         >
           <div class="col-span-1 flex items-center">
             <input
@@ -3883,7 +4487,7 @@
               disabled={localVideoItems.length === 0}
               onchange={toggleAllRows}
               aria-label="Select all video files"
-              class="h-3.5 w-3.5 accent-[#1A1513]"
+              class="h-3.5 w-3.5 accent-[#11824F] dark:accent-[#4CDE99]"
             />
           </div>
           <div class="col-span-2">Type / Episode</div>
@@ -3897,7 +4501,7 @@
         </div>
       {:else}
         <div
-          class="grid shrink-0 grid-cols-12 items-center border-b border-[#E6E0D6] bg-[#FAF8F4] px-5 py-2 text-[10px] font-bold uppercase tracking-[0.08em] text-[#7D716A]"
+          class="grid shrink-0 grid-cols-12 items-center border-b border-[#E6E0D6] bg-[#FAF8F4] px-5 py-2 text-[10px] font-bold uppercase tracking-[0.08em] text-[#7D716A] dark:border-[#332925] dark:bg-[#120E0D] dark:text-[#9E9187]"
         >
           <div class="col-span-1 flex items-center">
             <input
@@ -3906,7 +4510,7 @@
               disabled={titles.length === 0}
               onchange={toggleAllRows}
               aria-label="Select all disc titles"
-              class="h-3.5 w-3.5 accent-[#1A1513]"
+              class="h-3.5 w-3.5 accent-[#11824F] dark:accent-[#4CDE99]"
             />
           </div>
           <div class="col-span-4">Title / Episode</div>
@@ -3925,11 +4529,11 @@
               class="flex h-full flex-col items-center justify-center px-6 py-16 text-center"
             >
               <div
-                class="mb-3 flex h-11 w-11 items-center justify-center rounded-full border border-[#E6E0D6] bg-[#FAF8F4] text-[#61554F]"
+                class="mb-3 flex h-11 w-11 items-center justify-center rounded-full border border-[#E6E0D6] bg-[#FAF8F4] text-[#61554F] dark:border-[#332925] dark:bg-[#221C19] dark:text-[#B8ABA0]"
               >
                 {#if isOrganizeMode}
                   <svg
-                    class="h-5 w-5 text-[#0E5678]"
+                    class="h-5 w-5 text-[#0E5678] dark:text-[#5BC0EB]"
                     viewBox="0 0 24 24"
                     fill="none"
                     stroke="currentColor"
@@ -3953,21 +4557,21 @@
                   </svg>
                 {/if}
               </div>
-              <h2 class="text-sm font-bold tracking-[-0.01em] text-[#1A1513]">
+              <h2 class="text-sm font-bold tracking-[-0.01em] text-[#1A1513] dark:text-[#F5EFE8]">
                 {isOrganizeMode
                   ? "Connect a folder to look up, rename & reorganize"
                   : "Add a TV season folder or video files to batch encode"}
               </h2>
-              <p class="mt-1 max-w-md text-xs leading-relaxed text-[#7D716A]">
+              <p class="mt-1 max-w-md text-xs leading-relaxed text-[#7D716A] dark:text-[#9E9187]">
                 {#if isOrganizeMode}
                   Already have the encodes you want? Connect any messy movie or TV
                   directory — RipDaddy runs IMDb / TVDB / TMDB / TVMaze lookups,
-                  previews every rename and <span class="font-mono text-[#1A1513]">.srt/.nfo</span>
+                  previews every rename and <span class="font-mono text-[#1A1513] dark:text-[#F5EFE8]">.srt/.nfo</span>
                   sidecar, and reorganizes in place with one-click Undo. No MakeMKV
                   or HandBrake required.
                 {:else}
-                  Drop in an entire folder of oversized <span class="font-mono text-[#1A1513]">.mkv</span>
-                  or <span class="font-mono text-[#1A1513]">.mp4</span> episodes. RipDaddy
+                  Drop in an entire folder of oversized <span class="font-mono text-[#1A1513] dark:text-[#F5EFE8]">.mkv</span>
+                  or <span class="font-mono text-[#1A1513] dark:text-[#F5EFE8]">.mp4</span> episodes. RipDaddy
                   automatically identifies the show and episodes via TVDB/TMDB/TVMaze,
                   uniforms all filenames, generates trickplay frames, and encodes the whole
                   folder with one quality profile.
@@ -3978,7 +4582,7 @@
                   type="button"
                   onclick={() => void pickLocalVideoFolder()}
                   disabled={!modeReady || identifyingFolder}
-                  class="rounded-md bg-[#11824F] px-4 py-2 text-xs font-semibold text-white transition hover:bg-[#0D6E42] disabled:cursor-not-allowed disabled:bg-[#D6CFC3] disabled:text-[#7D716A]"
+                  class="rounded-md bg-[#11824F] px-4 py-2 text-xs font-semibold text-white transition hover:bg-[#0D6E42] disabled:cursor-not-allowed disabled:bg-[#D6CFC3] disabled:text-[#7D716A] dark:disabled:bg-[#2C2420] dark:disabled:text-[#6E6058]"
                 >
                   {#if identifyingFolder}
                     Scanning Folder...
@@ -3992,20 +4596,20 @@
                   type="button"
                   onclick={() => void pickLocalVideoFiles()}
                   disabled={!modeReady || identifyingFolder}
-                  class="rounded-md border border-[#DAD3C7] bg-white px-4 py-2 text-xs font-semibold text-[#1A1513] transition hover:bg-[#FAF8F4] disabled:cursor-not-allowed disabled:opacity-50"
+                  class="rounded-md border border-[#DAD3C7] bg-white px-4 py-2 text-xs font-semibold text-[#1A1513] transition hover:bg-[#FAF8F4] disabled:cursor-not-allowed disabled:opacity-50 dark:border-[#3A2F2A] dark:bg-[#221C19] dark:text-[#F5EFE8] dark:hover:bg-[#2E2622]"
                 >
                   + Add Video Files
                 </button>
               </div>
             </div>
           {:else}
-            <div class="divide-y divide-[#EDE7DD]">
+            <div class="divide-y divide-[#EDE7DD] dark:divide-[#2B221E]">
               {#each localVideoItems as item, idx (item.path)}
                 <div
                   class={`grid grid-cols-12 items-center gap-2 px-5 py-2.5 text-xs transition ${
                     inspectedLocalFile === item.path
-                      ? "bg-[#EEFCF5]"
-                      : "hover:bg-[#F7F4EE]"
+                      ? "bg-[#EEFCF5] dark:bg-[#4CDE99]/10"
+                      : "hover:bg-[#F7F4EE] dark:hover:bg-[#221C19]"
                   }`}
                 >
                   <div class="col-span-1 flex items-center">
@@ -4014,7 +4618,7 @@
                       checked={checkedLocalFiles.includes(item.path)}
                       onchange={() => toggleLocalFileChecked(item.path)}
                       aria-label={`Select ${item.fileName}`}
-                      class="h-3.5 w-3.5 accent-[#1A1513]"
+                      class="h-3.5 w-3.5 accent-[#11824F] dark:accent-[#4CDE99]"
                     />
                   </div>
 
@@ -4024,7 +4628,7 @@
                         type="button"
                         onclick={() => toggleItemMediaKind(item.path)}
                         title="Detected as TV episode (click to switch to Movie)"
-                        class="rounded border border-[#9CD9F5] bg-[#E6F6FD] px-1 py-0.5 font-mono text-[9px] font-bold uppercase text-[#0E5678] hover:bg-[#D1EFFB]"
+                        class="rounded border border-[#9CD9F5] bg-[#E6F6FD] px-1 py-0.5 font-mono text-[9px] font-bold uppercase text-[#0E5678] hover:bg-[#D1EFFB] dark:border-[#5BC0EB]/40 dark:bg-[#5BC0EB]/15 dark:text-[#8BD7F8]"
                       >
                         TV
                       </button>
@@ -4040,9 +4644,9 @@
                             "season",
                             e.currentTarget.value,
                           )}
-                        class="w-6 rounded border border-[#DAD3C7] bg-white px-0.5 py-0.5 text-center font-mono text-[10px] font-semibold text-[#1A1513] outline-none focus:border-[#11824F]"
+                        class="w-6 rounded border border-[#DAD3C7] bg-white px-0.5 py-0.5 text-center font-mono text-[10px] font-semibold text-[#1A1513] outline-none focus:border-[#11824F] dark:border-[#3A2F2A] dark:bg-[#120E0D] dark:text-[#F5EFE8] dark:focus:border-[#4CDE99]"
                       />
-                      <span class="font-mono text-[9px] text-[#7D716A]">×</span>
+                      <span class="font-mono text-[9px] text-[#7D716A] dark:text-[#9E9187]">×</span>
                       <input
                         type="text"
                         inputmode="numeric"
@@ -4054,9 +4658,9 @@
                             "episode",
                             e.currentTarget.value,
                           )}
-                        class="w-6 rounded border border-[#DAD3C7] bg-white px-0.5 py-0.5 text-center font-mono text-[10px] font-semibold text-[#1A1513] outline-none focus:border-[#11824F]"
+                        class="w-6 rounded border border-[#DAD3C7] bg-white px-0.5 py-0.5 text-center font-mono text-[10px] font-semibold text-[#1A1513] outline-none focus:border-[#11824F] dark:border-[#3A2F2A] dark:bg-[#120E0D] dark:text-[#F5EFE8] dark:focus:border-[#4CDE99]"
                       />
-                      <span class="font-mono text-[9px] text-[#7D716A]">-</span>
+                      <span class="font-mono text-[9px] text-[#7D716A] dark:text-[#9E9187]">-</span>
                       <input
                         type="text"
                         inputmode="numeric"
@@ -4070,14 +4674,14 @@
                             "episodeEnd",
                             e.currentTarget.value,
                           )}
-                        class="w-6 rounded border border-[#E6E0D6] bg-[#FAF8F4] px-0.5 py-0.5 text-center font-mono text-[10px] font-semibold text-[#1A1513] placeholder:text-[#B6AEA2] outline-none focus:border-[#11824F] focus:bg-white"
+                        class="w-6 rounded border border-[#E6E0D6] bg-[#FAF8F4] px-0.5 py-0.5 text-center font-mono text-[10px] font-semibold text-[#1A1513] placeholder:text-[#B6AEA2] outline-none focus:border-[#11824F] focus:bg-white dark:border-[#3A2F2A] dark:bg-[#221C19] dark:text-[#F5EFE8] dark:placeholder:text-[#6E6058] dark:focus:border-[#4CDE99] dark:focus:bg-[#120E0D]"
                       />
                     {:else}
                       <button
                         type="button"
                         onclick={() => toggleItemMediaKind(item.path)}
                         title="Detected as Movie (click to switch to TV episode)"
-                        class="rounded border border-[#9BE5C1] bg-[#E6FBF1] px-1.5 py-0.5 font-mono text-[9px] font-bold uppercase text-[#0E4D31] hover:bg-[#CEF6E3]"
+                        class="rounded border border-[#9BE5C1] bg-[#E6FBF1] px-1.5 py-0.5 font-mono text-[9px] font-bold uppercase text-[#0E4D31] hover:bg-[#CEF6E3] dark:border-[#4CDE99]/40 dark:bg-[#4CDE99]/15 dark:text-[#7AF0B8]"
                       >
                         Movie
                       </button>
@@ -4085,7 +4689,7 @@
                         <button
                           type="button"
                           onclick={() => inspectLocalFile(item.path)}
-                          class="rounded border border-[#E8BF6E] bg-[#FFF7E6] px-1.5 py-0.5 text-[9px] font-semibold text-[#5E3906]"
+                          class="rounded border border-[#E8BF6E] bg-[#FFF7E6] px-1.5 py-0.5 text-[9px] font-semibold text-[#5E3906] dark:border-[#F8B142]/45 dark:bg-[#F8B142]/15 dark:text-[#FCD283]"
                         >
                           Needs title
                         </button>
@@ -4096,7 +4700,7 @@
                             inspectLocalFile(item.path);
                             searchResults = item.movieCandidates;
                           }}
-                          class="rounded border border-[#E6E0D6] bg-white px-1.5 py-0.5 text-[9px] font-semibold text-[#61554F] hover:text-[#1A1513]"
+                          class="rounded border border-[#E6E0D6] bg-white px-1.5 py-0.5 text-[9px] font-semibold text-[#61554F] hover:text-[#1A1513] dark:border-[#3A2F2A] dark:bg-[#221C19] dark:text-[#CFC5BB] dark:hover:text-[#F5EFE8]"
                         >
                           Switch
                         </button>
@@ -4113,18 +4717,18 @@
                     <div class="flex items-center gap-1.5">
                       {#if detectedShows.length > 1 && item.mediaKind === "tvEpisode" && item.seriesMetadata}
                         <span
-                          class="max-w-[110px] shrink-0 truncate rounded border border-[#9BE5C1] bg-[#E6FBF1] px-1.5 py-0.2 text-[9px] font-bold text-[#0E4D31]"
+                          class="max-w-[110px] shrink-0 truncate rounded border border-[#9BE5C1] bg-[#E6FBF1] px-1.5 py-0.2 text-[9px] font-bold text-[#0E4D31] dark:border-[#4CDE99]/40 dark:bg-[#4CDE99]/15 dark:text-[#7AF0B8]"
                           title={item.seriesMetadata.title}
                         >
                           {item.seriesMetadata.title}
                         </span>
                       {/if}
-                      <span class="truncate font-semibold text-[#1A1513] hover:text-[#11824F]">
+                      <span class="truncate font-semibold text-[#1A1513] hover:text-[#11824F] dark:text-[#F5EFE8] dark:hover:text-[#4CDE99]">
                         {item.fileName}
                       </span>
                       {#if item.extraType}
                         <span
-                          class="shrink-0 rounded border border-[#F8B4C0] bg-[#FFF0F2] px-1.5 py-0.2 font-mono text-[9px] font-semibold text-[#751A2E]"
+                          class="shrink-0 rounded border border-[#F8B4C0] bg-[#FFF0F2] px-1.5 py-0.2 font-mono text-[9px] font-semibold text-[#751A2E] dark:border-[#FA637C]/45 dark:bg-[#FA637C]/15 dark:text-[#FF99AA]"
                         >
                           {extraTypeSuffix(item.extraType)}
                         </span>
@@ -4137,7 +4741,7 @@
                       {/if}
                     </div>
                     <div
-                      class="truncate font-mono text-[10px] text-[#0E5678]"
+                      class="truncate font-mono text-[10px] text-[#0E5678] dark:text-[#8BD7F8]"
                       title={formatItemTargetFilename(item, idx)}
                     >
                       → {formatItemTargetFilename(item, idx)}
@@ -4146,14 +4750,14 @@
 
                   <div class="col-span-2 text-right font-mono text-[11px]">
                     {#if item.durationSeconds}
-                      <span class="text-[#7D716A]">
+                      <span class="text-[#7D716A] dark:text-[#9E9187]">
                         {formatDurationShort(item.durationSeconds)} ·
                       </span>
                     {/if}
                     <span
                       class={(item.fileSizeBytes ?? 0) >= 8_000_000_000
-                        ? "font-semibold text-[#AF6C0B]"
-                        : "text-[#544943]"}
+                        ? "font-semibold text-[#AF6C0B] dark:text-[#F8B142]"
+                        : "text-[#544943] dark:text-[#CFC5BB]"}
                     >
                       {formatBytesHuman(item.fileSizeBytes)}
                     </span>
@@ -4165,8 +4769,8 @@
                       onclick={() => inspectLocalFile(item.path)}
                       class={`rounded border px-2 py-0.5 text-[10px] font-semibold transition ${
                         inspectedLocalFile === item.path
-                          ? "border-[#1C8EC0] bg-[#E6F6FD] text-[#0E5678]"
-                          : "border-[#DAD3C7] bg-white text-[#1A1513] hover:bg-[#FAF8F4]"
+                          ? "border-[#1C8EC0] bg-[#E6F6FD] text-[#0E5678] dark:border-[#5BC0EB]/50 dark:bg-[#5BC0EB]/15 dark:text-[#8BD7F8]"
+                          : "border-[#DAD3C7] bg-white text-[#1A1513] hover:bg-[#FAF8F4] dark:border-[#3A2F2A] dark:bg-[#221C19] dark:text-[#F5EFE8] dark:hover:bg-[#2E2622]"
                       }`}
                     >
                       {inspectedLocalFile === item.path ? "Viewing" : "Frames"}
@@ -4174,7 +4778,7 @@
                     <button
                       type="button"
                       onclick={() => removeLocalSourceFile(item.path)}
-                      class="text-[11px] font-medium text-[#7D716A] hover:text-red-600"
+                      class="text-[11px] font-medium text-[#7D716A] hover:text-red-600 dark:text-[#9E9187] dark:hover:text-red-400"
                     >
                       Remove
                     </button>
@@ -4188,7 +4792,7 @@
             class="flex h-full flex-col items-center justify-center px-6 py-16 text-center"
           >
             <div
-              class="mb-3 flex h-11 w-11 items-center justify-center rounded-full border border-[#E6E0D6] bg-[#FAF8F4] text-[#61554F]"
+              class="mb-3 flex h-11 w-11 items-center justify-center rounded-full border border-[#E6E0D6] bg-[#FAF8F4] text-[#61554F] dark:border-[#332925] dark:bg-[#221C19] dark:text-[#B8ABA0]"
             >
               <svg
                 class="h-5 w-5"
@@ -4202,27 +4806,27 @@
                 <circle cx="12" cy="12" r="2.5" />
               </svg>
             </div>
-            <h2 class="text-sm font-bold tracking-[-0.01em] text-[#1A1513]">
+            <h2 class="text-sm font-bold tracking-[-0.01em] text-[#1A1513] dark:text-[#F5EFE8]">
               {scanningDrives || scanningDisc
                 ? "Scanning optical disc..."
                 : "No disc titles loaded"}
             </h2>
-            <p class="mt-1 max-w-md text-xs leading-relaxed text-[#7D716A]">
+            <p class="mt-1 max-w-md text-xs leading-relaxed text-[#7D716A] dark:text-[#9E9187]">
               {#if scanStatusMessage}
                 {scanStatusMessage}
               {:else}
                 Insert a DVD or Blu-ray and click
-                <span class="font-semibold text-[#1A1513]">Scan</span> to populate
+                <span class="font-semibold text-[#1A1513] dark:text-[#F5EFE8]">Scan</span> to populate
                 titles, durations, chapters, and selectable video/audio/subtitle
                 track pills (filtering titles shorter than
-                <span class="font-mono text-[#1A1513]">{settings.minTitleLengthSeconds}s</span>).
+                <span class="font-mono text-[#1A1513] dark:text-[#F5EFE8]">{settings.minTitleLengthSeconds}s</span>).
               {/if}
             </p>
             {#if !modeReady}
               <button
                 type="button"
                 onclick={() => openSettingsAt("binaries")}
-                class="mt-4 rounded-md border border-[#D68D1C] bg-[#FFF7E6] px-3.5 py-1.5 text-xs font-semibold text-[#5E3906] hover:bg-[#FDEBC4]"
+                class="mt-4 rounded-md border border-[#D68D1C] bg-[#FFF7E6] px-3.5 py-1.5 text-xs font-semibold text-[#5E3906] hover:bg-[#FDEBC4] dark:border-[#F8B142]/45 dark:bg-[#F8B142]/15 dark:text-[#FCD283]"
               >
                 Open Settings → External CLIs
               </button>
@@ -4237,16 +4841,18 @@
             {/if}
           </div>
         {:else}
-          <div class="divide-y divide-[#EDE7DD]">
+          <div class="divide-y divide-[#EDE7DD] dark:divide-[#2B221E]">
             {#each titles as title, idx (title.titleId)}
               {@const excludedStreams = excludedStreamIdsByTitle[title.titleId] ?? []}
               {@const rowExtra = titleExtraById[title.titleId] ?? null}
               {@const rowEpEnd = titleEpisodeEndById[title.titleId] ?? null}
+              {@const isMainFeature = discAnalysis.mainFeatureTitleId === title.titleId}
+              {@const dupGroup = discAnalysis.duplicateByTitleId[title.titleId] ?? null}
               <div
                 class={`grid grid-cols-12 items-center gap-2 px-5 py-2.5 text-xs transition ${
                   inspectedTitleId === title.titleId
-                    ? "bg-[#EEFCF5]"
-                    : "hover:bg-[#F7F4EE]"
+                    ? "bg-[#EEFCF5] dark:bg-[#4CDE99]/10"
+                    : "hover:bg-[#F7F4EE] dark:hover:bg-[#221C19]"
                 }`}
               >
                 <div class="col-span-1 flex items-center">
@@ -4255,22 +4861,38 @@
                     checked={checkedTitleIds.includes(title.titleId)}
                     onchange={() => toggleTitleChecked(title.titleId)}
                     aria-label={`Select title ${title.titleId}`}
-                    class="h-3.5 w-3.5 accent-[#1A1513]"
+                    class="h-3.5 w-3.5 accent-[#11824F] dark:accent-[#4CDE99]"
                   />
                 </div>
-                <div class="col-span-4 flex min-w-0 items-center gap-1.5">
+                <div class="col-span-4 flex min-w-0 flex-wrap items-center gap-1.5">
                   {#if mediaKind === "tvEpisode" && !rowExtra}
                     <span
-                      class="shrink-0 rounded border border-[#9CD9F5] bg-[#E6F6FD] px-1.5 py-0.5 font-mono text-[10px] font-semibold text-[#0E5678]"
+                      class="shrink-0 rounded border border-[#9CD9F5] bg-[#E6F6FD] px-1.5 py-0.5 font-mono text-[10px] font-semibold text-[#0E5678] dark:border-[#5BC0EB]/40 dark:bg-[#5BC0EB]/15 dark:text-[#8BD7F8]"
                     >
                       {rowEpEnd && rowEpEnd > parsedStartEpisode + idx
                         ? `${episodeCodeForRow(idx)}-E${String(rowEpEnd).padStart(2, "0")}`
                         : episodeCodeForRow(idx)}
                     </span>
                   {/if}
+                  {#if isMainFeature && titles.length > 1 && mediaKind === "movie"}
+                    <span
+                      title="Longest title on disc (Main Feature)"
+                      class="shrink-0 rounded border border-[#1FA868] bg-[#E6FBF1] px-1.5 py-0.2 font-mono text-[9px] font-bold uppercase text-[#0E4D31] dark:border-[#4CDE99]/40 dark:bg-[#4CDE99]/15 dark:text-[#7AF0B8]"
+                    >
+                      Main
+                    </span>
+                  {/if}
+                  {#if dupGroup}
+                    <span
+                      title={`Duplicate duration (${title.duration ?? ""}) shared by ${dupGroup.count} titles — verify playlist (${title.sourceFileName ?? "unknown"}) on obfuscated Blu-rays`}
+                      class="shrink-0 rounded border border-[#D68D1C] bg-[#FFF7E6] px-1.5 py-0.2 font-mono text-[9px] font-bold text-[#5E3906] dark:border-[#F8B142]/45 dark:bg-[#F8B142]/15 dark:text-[#FCD283]"
+                    >
+                      ⚠ Dup ×{dupGroup.count}
+                    </span>
+                  {/if}
                   {#if rowExtra}
                     <span
-                      class="shrink-0 rounded border border-[#F8B4C0] bg-[#FFF0F2] px-1.5 py-0.5 font-mono text-[10px] font-semibold text-[#751A2E]"
+                      class="shrink-0 rounded border border-[#F8B4C0] bg-[#FFF0F2] px-1.5 py-0.5 font-mono text-[10px] font-semibold text-[#751A2E] dark:border-[#FA637C]/45 dark:bg-[#FA637C]/15 dark:text-[#FF99AA]"
                     >
                       {extraTypeSuffix(rowExtra)}
                     </span>
@@ -4278,15 +4900,20 @@
                   <button
                     type="button"
                     onclick={() => inspectTitle(title.titleId)}
-                    class="truncate text-left font-semibold text-[#1A1513] hover:text-[#11824F]"
+                    class="truncate text-left font-semibold text-[#1A1513] hover:text-[#11824F] dark:text-[#F5EFE8] dark:hover:text-[#4CDE99]"
                   >
                     {title.name ?? `Title #${title.titleId}`}
                   </button>
+                  {#if dupGroup && title.sourceFileName}
+                    <span class="shrink-0 font-mono text-[9px] text-[#7D716A] dark:text-[#9E9187]">
+                      {title.sourceFileName}
+                    </span>
+                  {/if}
                 </div>
-                <div class="col-span-1 font-mono text-[11px] text-[#544943]">
+                <div class="col-span-1 font-mono text-[11px] text-[#544943] dark:text-[#CFC5BB]">
                   {title.duration ?? "--:--"}
                 </div>
-                <div class="col-span-1 font-mono text-[11px] text-[#544943]">
+                <div class="col-span-1 font-mono text-[11px] text-[#544943] dark:text-[#CFC5BB]">
                   {title.sizeHuman ?? "--"}
                 </div>
                 <div class="col-span-4 flex flex-wrap items-center gap-1">
@@ -4304,7 +4931,7 @@
                         title={`${excluded ? "Excluded" : "Included"} ${track.trackType} (${track.languageName ?? track.languageCode ?? "und"}) — click to toggle`}
                         class={`inline-flex items-center gap-0.5 rounded-full border px-2 py-0.5 text-[10px] font-semibold transition ${
                           excluded
-                            ? "border-dashed border-[#D6CFC3] bg-[#FAF8F4] text-[#9E928B] line-through opacity-75 hover:border-[#1A1513]"
+                            ? "border-dashed border-[#D6CFC3] bg-[#FAF8F4] text-[#9E928B] line-through opacity-75 hover:border-[#1A1513] dark:border-[#443731] dark:bg-[#221C19] dark:text-[#8E8178] dark:hover:border-[#F5EFE8]"
                             : `${trackPillClass(track)} hover:brightness-95`
                         }`}
                       >
@@ -4325,7 +4952,7 @@
                     <button
                       type="button"
                       onclick={() => inspectTitle(title.titleId)}
-                      class="font-mono text-[10px] font-semibold text-[#0E5678] hover:underline"
+                      class="font-mono text-[10px] font-semibold text-[#0E5678] hover:underline dark:text-[#8BD7F8]"
                     >
                       +{title.streams.length - 6}
                     </button>
@@ -4335,7 +4962,7 @@
                   <button
                     type="button"
                     onclick={() => inspectTitle(title.titleId)}
-                    class="rounded border border-[#DAD3C7] bg-white px-2 py-0.5 text-[10px] font-semibold text-[#1A1513] hover:bg-[#FAF8F4]"
+                    class="rounded border border-[#DAD3C7] bg-white px-2 py-0.5 text-[10px] font-semibold text-[#1A1513] hover:bg-[#FAF8F4] dark:border-[#3A2F2A] dark:bg-[#221C19] dark:text-[#F5EFE8] dark:hover:bg-[#2E2622]"
                   >
                     Inspect
                   </button>
@@ -4352,6 +4979,7 @@
       <PreviewDrawer
         {workflowMode}
         selectedTitle={inspectedTitle}
+        selectedTitleDuplicateGroup={inspectedTitleDuplicateGroup}
         selectedLocalFile={inspectedLocalFile}
         {outputFilenamePreview}
         {namingConvention}
@@ -4387,10 +5015,17 @@
   <QueueDock
     expanded={queueExpanded}
     jobs={queueJobs}
+    paused={queuePaused}
+    {restoredPendingCount}
     {jobLogs}
     onToggleExpanded={() => (queueExpanded = !queueExpanded)}
+    onTogglePaused={() => void handleToggleQueuePaused()}
     onCancelJob={(jobId) => void handleCancelJob(jobId)}
     onRetryJob={(jobId) => void handleRetryJob(jobId)}
+    onMoveJob={(jobId, action) => void handleMoveJob(jobId, action)}
+    onReorderJobToIndex={(jobId, targetIndex) =>
+      void handleReorderJobToIndex(jobId, targetIndex)}
+    onRemoveJob={(jobId) => void handleRemoveJob(jobId)}
     onRevealPath={(path) => void handleRevealPath(path)}
     onClearFinished={() => void handleClearFinished()}
   />
@@ -4404,14 +5039,30 @@
     {installingBinary}
     {checkError}
     {setupOutcomes}
+    {encoderCaps}
+    {probingEncoders}
+    {storageSpace}
+    {loadingDiskSpace}
+    {testingNotification}
+    {notificationTestStatus}
     {settings}
     onClose={() => (settingsOpen = false)}
-    onSelectCategory={(cat) => (settingsCategory = cat)}
+    onSelectCategory={(cat) => {
+      settingsCategory = cat;
+      if (cat === "storage") {
+        void refreshDiskSpace();
+      } else if (cat === "encoding" && !encoderCaps && !probingEncoders) {
+        void runProbeEncoders();
+      }
+    }}
     onUpdateSetting={updateSetting}
     onUpdateQualityProfile={handleUpdateQualityProfile}
     onResetQualityProfiles={(key) => void handleResetQualityProfiles(key)}
     onOpenSetupWizard={() => (firstRunModalOpen = true)}
     onRecheckBinaries={() => void runCheckBinaries()}
+    onProbeEncoders={() => void runProbeEncoders()}
+    onRefreshDiskSpace={() => void refreshDiskSpace()}
+    onTestNotification={() => void handleTestNotification()}
     onAutoSetupAll={() => void runAutoSetupAll()}
     onInstallSingle={(kind) => void runInstallSingle(kind)}
     onBrowseBinary={(target) => void browseBinary(target)}

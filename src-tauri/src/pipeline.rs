@@ -1,5 +1,6 @@
 //! Decoupled two-stage rip-and-encode queue state machine, live Tokio workers,
-//! Tauri event emission, and child-process safety registry.
+//! atomic disk persistence (`queue.json`), dynamic job reordering, OS completion/eject
+//! notifications, Tauri event emission, and child-process safety registry.
 //!
 //! Supported workflow modes (`PipelineMode`):
 //! - `RipOnly`:      `QueuedForRip -> Ripping -> Completed`
@@ -7,8 +8,8 @@
 //! - `RipAndEncode`: `QueuedForRip -> Ripping -> QueuedForEncode -> Encoding -> CleaningTemp -> Completed`
 //!
 //! Stage 1 (Rip Worker / `makemkvcon`) and Stage 2 (Encode Worker / `HandBrakeCLI`)
-//! run on independent bounded `tokio::sync::mpsc` queues so optical disc ripping and
-//! video encoding overlap smoothly without blocking each other.
+//! run independently over the ordered `jobs` Vec driven by `tokio::sync::watch` wake signals
+//! so reordering queued jobs takes effect immediately on the next worker pick.
 
 use crate::detect::{self, ResolvedCommand};
 use crate::handbrake::{
@@ -17,23 +18,28 @@ use crate::handbrake::{
 };
 use crate::makemkv::{self, RobotMessage};
 use crate::metadata::{self, FolderOrganization, MediaMetadata, NamingConvention};
+use crate::system;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::{mpsc, watch, RwLock};
 
-/// Default bounded channel capacity for each decoupled worker queue.
-const WORKER_QUEUE_CAPACITY: usize = 64;
 const PROGRESS_THROTTLE: Duration = Duration::from_millis(200);
+const PERSISTED_QUEUE_VERSION: u32 = 1;
+const PERSISTED_QUEUE_FILENAME: &str = "queue.json";
 pub const PIPELINE_EVENT_NAME: &str = "pipeline-event";
+
+fn default_true() -> bool {
+    true
+}
 
 /// Controls which pipeline stages a job executes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -98,6 +104,19 @@ impl JobStage {
         self.can_transition_to_for_mode(PipelineMode::RipAndEncode, next)
     }
 
+    /// Returns `true` if the job is currently waiting in a queue and may be reordered.
+    pub fn is_pending(self) -> bool {
+        matches!(self, JobStage::QueuedForRip | JobStage::QueuedForEncode)
+    }
+
+    /// Returns `true` if a child process or cleanup is actively executing.
+    pub fn is_running(self) -> bool {
+        matches!(
+            self,
+            JobStage::Ripping | JobStage::Encoding | JobStage::CleaningTemp
+        )
+    }
+
     /// Returns `true` if no further transitions are permitted from this stage.
     pub fn is_terminal(self) -> bool {
         matches!(
@@ -105,6 +124,16 @@ impl JobStage {
             JobStage::Completed | JobStage::Cancelled | JobStage::Failed
         )
     }
+}
+
+/// Direction for reordering a pending job within the queue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ReorderAction {
+    Top,
+    Up,
+    Down,
+    Bottom,
 }
 
 /// Real-time progress snapshot associated with a queued or active job.
@@ -167,6 +196,15 @@ impl QueueJob {
     }
 }
 
+/// Full queue snapshot returned to the frontend on load, pause/resume, or reorder.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueueStateSnapshot {
+    pub jobs: Vec<QueueJob>,
+    pub paused: bool,
+    pub restored_pending_count: usize,
+}
+
 /// Request sent from the frontend to enqueue one disc title or local video file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -185,6 +223,8 @@ pub struct EnqueueJobRequest {
     pub output_dir: String,
     pub keep_temp_mkv: bool,
     pub auto_eject_disc: bool,
+    #[serde(default = "default_true")]
+    pub notify_on_complete: bool,
     pub naming_convention: NamingConvention,
     pub folder_organization: Option<FolderOrganization>,
     pub media_metadata: Option<MediaMetadata>,
@@ -192,8 +232,9 @@ pub struct EnqueueJobRequest {
     pub track_selection: TrackSelectionOptions,
 }
 
-/// Internal execution metadata retained alongside each `QueueJob`.
-#[derive(Debug, Clone)]
+/// Internal execution metadata retained alongside each `QueueJob` and persisted to `queue.json`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct JobExecutionSpec {
     makemkv_cmd: Option<ResolvedCommand>,
     handbrake_cmd: Option<ResolvedCommand>,
@@ -202,7 +243,35 @@ struct JobExecutionSpec {
     custom_preset_name: Option<String>,
     drive_device_path: Option<String>,
     auto_eject_disc: bool,
+    #[serde(default = "default_true")]
+    notify_on_complete: bool,
+    #[serde(default)]
     track_selection: TrackSelectionOptions,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PersistedQueueEntry {
+    job: QueueJob,
+    spec: JobExecutionSpec,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PersistedQueueFile {
+    version: u32,
+    next_job_counter: u64,
+    entries: Vec<PersistedQueueEntry>,
+}
+
+/// Tracks batch outcomes so a single native OS completion alert fires when the queue empties.
+#[derive(Debug, Default)]
+struct BatchNotifyTracker {
+    completed: usize,
+    failed: usize,
+    last_title: String,
+    last_mode: Option<PipelineMode>,
+    last_ejected_rip_only: bool,
 }
 
 /// Structured events streamed from Rust to the Svelte frontend via Tauri events / `Channel`.
@@ -211,6 +280,11 @@ struct JobExecutionSpec {
 pub enum PipelineEvent {
     #[serde(rename_all = "camelCase")]
     JobUpdated { job: QueueJob },
+    #[serde(rename_all = "camelCase")]
+    QueueSnapshot {
+        jobs: Vec<QueueJob>,
+        paused: bool,
+    },
     #[serde(rename_all = "camelCase")]
     Progress {
         job_id: String,
@@ -233,6 +307,18 @@ pub enum PipelineEvent {
     TempCleaned {
         job_id: String,
         removed_path: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    DiscEjected {
+        job_id: String,
+        disc_name: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    BatchCompleted {
+        completed: usize,
+        failed: usize,
+        title: String,
+        body: String,
     },
 }
 
@@ -517,22 +603,164 @@ where
     spawn_and_stream_resolved(&resolved, args, job_id, stage, registry, on_line).await
 }
 
-/// Decoupled receiver ends owned by the Rip Worker and Encode Worker tasks once spawned.
-pub struct WorkerChannels {
-    pub rip_rx: mpsc::Receiver<String>,
-    pub encode_rx: mpsc::Receiver<String>,
+/// Shared runtime handles passed to the Stage 1 (Rip) and Stage 2 (Encode) workers.
+#[derive(Clone)]
+struct WorkerShared {
+    jobs: Arc<RwLock<Vec<QueueJob>>>,
+    specs: Arc<RwLock<HashMap<String, JobExecutionSpec>>>,
+    processes: Arc<ProcessRegistry>,
+    wake_tx: watch::Sender<u64>,
+    paused: Arc<AtomicBool>,
+    notifications_enabled: Arc<AtomicBool>,
+    batch_tracker: Arc<Mutex<BatchNotifyTracker>>,
+    store_path: Arc<Mutex<Option<PathBuf>>>,
+    job_counter: Arc<AtomicU64>,
+    app: AppHandle,
 }
 
-/// Tauri-managed state coordinating the decoupled Rip -> Encode -> Cleanup pipeline.
+impl WorkerShared {
+    fn wake_workers(&self) {
+        self.wake_tx.send_modify(|seq| *seq = seq.wrapping_add(1));
+    }
+
+    async fn persist_queue(&self) {
+        let path_opt = self
+            .store_path
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let Some(path) = path_opt else {
+            return;
+        };
+        let jobs = self.jobs.read().await.clone();
+        let specs = self.specs.read().await.clone();
+        let next_counter = self.job_counter.load(Ordering::Relaxed);
+        let _ = write_queue_snapshot_sync(&path, &jobs, &specs, next_counter);
+    }
+
+    async fn record_terminal_outcome(
+        &self,
+        job_snapshot: &QueueJob,
+        succeeded: bool,
+        notify_allowed: bool,
+        ejected_rip_only: bool,
+    ) {
+        let all_terminal = self
+            .jobs
+            .read()
+            .await
+            .iter()
+            .all(|j| j.stage.is_terminal());
+
+        let maybe_alert = {
+            let mut tracker = self.batch_tracker.lock().unwrap_or_else(|e| e.into_inner());
+            if succeeded {
+                tracker.completed += 1;
+            } else {
+                tracker.failed += 1;
+            }
+            tracker.last_title = job_snapshot.title_name.clone();
+            tracker.last_mode = Some(job_snapshot.mode);
+            tracker.last_ejected_rip_only = ejected_rip_only;
+
+            if all_terminal && (tracker.completed + tracker.failed) > 0 {
+                let completed = tracker.completed;
+                let failed = tracker.failed;
+                let last_title = std::mem::take(&mut tracker.last_title);
+                let last_mode = tracker.last_mode.take();
+                let ejected = tracker.last_ejected_rip_only;
+                tracker.completed = 0;
+                tracker.failed = 0;
+                tracker.last_ejected_rip_only = false;
+                Some((completed, failed, last_title, last_mode, ejected))
+            } else {
+                None
+            }
+        };
+
+        if let Some((completed, failed, last_title, last_mode, ejected)) = maybe_alert {
+            let (title, body) = format_batch_notification(
+                completed,
+                failed,
+                &last_title,
+                last_mode,
+                ejected,
+            );
+            let _ = self.app.emit(
+                PIPELINE_EVENT_NAME,
+                &PipelineEvent::BatchCompleted {
+                    completed,
+                    failed,
+                    title: title.clone(),
+                    body: body.clone(),
+                },
+            );
+            if notify_allowed && self.notifications_enabled.load(Ordering::Relaxed) {
+                tokio::spawn(async move {
+                    let _ = system::send_desktop_notification(&title, &body).await;
+                });
+            }
+        }
+    }
+}
+
+fn format_batch_notification(
+    completed: usize,
+    failed: usize,
+    last_title: &str,
+    last_mode: Option<PipelineMode>,
+    ejected: bool,
+) -> (String, String) {
+    let eject_suffix = if ejected {
+        " Disc ejected — ready for the next disc."
+    } else {
+        ""
+    };
+
+    if failed == 0 && completed == 1 {
+        let verb = if last_mode == Some(PipelineMode::RipOnly) {
+            "Rip Complete"
+        } else {
+            "Encode Complete"
+        };
+        (
+            format!("RipDaddy · {verb}"),
+            format!("{last_title} is ready in your output folder.{eject_suffix}"),
+        )
+    } else if failed == 0 {
+        (
+            "RipDaddy · Batch Complete".to_string(),
+            format!("All {completed} queued jobs finished successfully.{eject_suffix}"),
+        )
+    } else if completed > 0 {
+        (
+            "RipDaddy · Batch Finished with Errors".to_string(),
+            format!(
+                "{completed} completed, {failed} failed. Open Queue Logs for details.{eject_suffix}"
+            ),
+        )
+    } else {
+        (
+            "RipDaddy · Job Failed".to_string(),
+            format!("{last_title} failed. Open Queue Logs for details."),
+        )
+    }
+}
+
+/// Tauri-managed state coordinating the decoupled, persistent, reorderable Rip -> Encode -> Cleanup pipeline.
 pub struct PipelineController {
     jobs: Arc<RwLock<Vec<QueueJob>>>,
     specs: Arc<RwLock<HashMap<String, JobExecutionSpec>>>,
     processes: Arc<ProcessRegistry>,
-    rip_tx: mpsc::Sender<String>,
-    encode_tx: mpsc::Sender<String>,
-    worker_channels: Mutex<Option<WorkerChannels>>,
+    wake_tx: watch::Sender<u64>,
+    paused: Arc<AtomicBool>,
+    restored_pending_count: AtomicUsize,
+    notifications_enabled: Arc<AtomicBool>,
+    batch_tracker: Arc<Mutex<BatchNotifyTracker>>,
+    store_path: Arc<Mutex<Option<PathBuf>>>,
     app_handle: Mutex<Option<AppHandle>>,
-    job_counter: AtomicU64,
+    workers_started: AtomicBool,
+    job_counter: Arc<AtomicU64>,
 }
 
 impl Default for PipelineController {
@@ -543,69 +771,222 @@ impl Default for PipelineController {
 
 impl PipelineController {
     pub fn new() -> Self {
-        let (rip_tx, rip_rx) = mpsc::channel(WORKER_QUEUE_CAPACITY);
-        let (encode_tx, encode_rx) = mpsc::channel(WORKER_QUEUE_CAPACITY);
+        let (wake_tx, _wake_rx) = watch::channel(0u64);
 
         Self {
             jobs: Arc::new(RwLock::new(Vec::new())),
             specs: Arc::new(RwLock::new(HashMap::new())),
             processes: Arc::new(ProcessRegistry::new()),
-            rip_tx,
-            encode_tx,
-            worker_channels: Mutex::new(Some(WorkerChannels { rip_rx, encode_rx })),
+            wake_tx,
+            paused: Arc::new(AtomicBool::new(false)),
+            restored_pending_count: AtomicUsize::new(0),
+            notifications_enabled: Arc::new(AtomicBool::new(true)),
+            batch_tracker: Arc::new(Mutex::new(BatchNotifyTracker::default())),
+            store_path: Arc::new(Mutex::new(None)),
             app_handle: Mutex::new(None),
-            job_counter: AtomicU64::new(1),
+            workers_started: AtomicBool::new(false),
+            job_counter: Arc::new(AtomicU64::new(1)),
         }
     }
 
-    /// Spawns the independent Stage 1 (Rip) and Stage 2 (Encode) Tokio worker tasks.
-    /// Safe to call once during Tauri `.setup(...)`.
+    /// Configures a custom queue persistence file path (primarily for deterministic testing).
+    pub fn set_store_path(&self, path: PathBuf) {
+        let mut slot = self.store_path.lock().unwrap_or_else(|e| e.into_inner());
+        *slot = Some(path);
+    }
+
+    /// Updates whether native OS completion & disc-eject desktop notifications are enabled.
+    pub fn set_notifications_enabled(&self, enabled: bool) {
+        self.notifications_enabled.store(enabled, Ordering::Relaxed);
+    }
+
+    /// Loads saved queue entries from disk, recovers any jobs that were mid-flight when the app
+    /// exited, and pauses worker auto-start when pending jobs were restored.
+    pub fn restore_persisted_queue_sync(&self) -> usize {
+        let path_opt = self
+            .store_path
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let Some(path) = path_opt else {
+            return 0;
+        };
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            return 0;
+        };
+        let Ok(parsed) = serde_json::from_str::<PersistedQueueFile>(&raw) else {
+            return 0;
+        };
+
+        let mut restored_jobs = Vec::with_capacity(parsed.entries.len());
+        let mut restored_specs = HashMap::with_capacity(parsed.entries.len());
+        let mut pending_count = 0usize;
+
+        for mut entry in parsed.entries {
+            match entry.job.stage {
+                JobStage::Ripping => {
+                    // Interrupted mid-rip: clean partial staging folder and requeue cleanly
+                    let staging_dir = staging_dir_for_job(&entry.job);
+                    let _ = std::fs::remove_dir_all(&staging_dir);
+                    entry.job.stage = JobStage::QueuedForRip;
+                    entry.job.progress = JobProgress {
+                        stage: JobStage::QueuedForRip,
+                        percent: 0.0,
+                        eta_seconds: None,
+                        fps: None,
+                        message: Some("Interrupted — restored to queue".to_string()),
+                    };
+                    pending_count += 1;
+                }
+                JobStage::Encoding => {
+                    // Interrupted mid-encode: remove incomplete output file and requeue cleanly
+                    let out_path = Path::new(&entry.job.output_path);
+                    if out_path.exists() {
+                        let _ = std::fs::remove_file(out_path);
+                    }
+                    entry.job.stage = JobStage::QueuedForEncode;
+                    entry.job.progress = JobProgress {
+                        stage: JobStage::QueuedForEncode,
+                        percent: 0.0,
+                        eta_seconds: None,
+                        fps: None,
+                        message: Some("Interrupted — restored to queue".to_string()),
+                    };
+                    pending_count += 1;
+                }
+                JobStage::CleaningTemp => {
+                    let out_exists = Path::new(&entry.job.output_path).exists();
+                    if out_exists {
+                        if !entry.job.keep_temp_mkv {
+                            if let Some(ref tmp) = entry.job.temp_mkv_path {
+                                let tmp_path = Path::new(tmp);
+                                let _ = std::fs::remove_file(tmp_path);
+                                if let Some(parent) = tmp_path.parent() {
+                                    let _ = std::fs::remove_dir(parent);
+                                }
+                            }
+                        }
+                        entry.job.stage = JobStage::Completed;
+                        entry.job.progress = JobProgress {
+                            stage: JobStage::Completed,
+                            percent: 100.0,
+                            eta_seconds: Some(0),
+                            fps: None,
+                            message: None,
+                        };
+                    } else {
+                        entry.job.stage = JobStage::QueuedForEncode;
+                        entry.job.progress = JobProgress {
+                            stage: JobStage::QueuedForEncode,
+                            percent: 0.0,
+                            eta_seconds: None,
+                            fps: None,
+                            message: Some("Interrupted — restored to queue".to_string()),
+                        };
+                        pending_count += 1;
+                    }
+                }
+                JobStage::QueuedForRip | JobStage::QueuedForEncode => {
+                    if entry.job.progress.message.is_none() {
+                        entry.job.progress.message =
+                            Some("Restored from previous session".to_string());
+                    }
+                    pending_count += 1;
+                }
+                JobStage::Completed | JobStage::Cancelled | JobStage::Failed => {}
+            }
+
+            restored_specs.insert(entry.job.id.clone(), entry.spec);
+            restored_jobs.push(entry.job);
+        }
+
+        let max_counter = parsed.next_job_counter.max(restored_jobs.len() as u64 + 1);
+        self.job_counter.store(max_counter, Ordering::Relaxed);
+
+        if let Ok(mut jobs_guard) = self.jobs.try_write() {
+            *jobs_guard = restored_jobs.clone();
+        }
+        if let Ok(mut specs_guard) = self.specs.try_write() {
+            *specs_guard = restored_specs.clone();
+        }
+
+        if pending_count > 0 {
+            self.paused.store(true, Ordering::SeqCst);
+            self.restored_pending_count
+                .store(pending_count, Ordering::Relaxed);
+        }
+
+        let _ = write_queue_snapshot_sync(&path, &restored_jobs, &restored_specs, max_counter);
+        pending_count
+    }
+
+    /// Spawns the independent Stage 1 (Rip) and Stage 2 (Encode) Tokio worker tasks
+    /// after restoring any persisted jobs from `<app_data_dir>/queue.json`.
     pub fn start_workers(&self, app_handle: AppHandle) {
         {
             let mut slot = self.app_handle.lock().unwrap_or_else(|e| e.into_inner());
             *slot = Some(app_handle.clone());
         }
 
-        let Some(channels) = self.take_worker_channels() else {
+        if let Ok(data_dir) = app_handle.path().app_data_dir() {
+            let mut slot = self.store_path.lock().unwrap_or_else(|e| e.into_inner());
+            if slot.is_none() {
+                *slot = Some(data_dir.join(PERSISTED_QUEUE_FILENAME));
+            }
+        }
+
+        self.restore_persisted_queue_sync();
+
+        if self.workers_started.swap(true, Ordering::SeqCst) {
             return;
+        }
+
+        let shared = WorkerShared {
+            jobs: Arc::clone(&self.jobs),
+            specs: Arc::clone(&self.specs),
+            processes: Arc::clone(&self.processes),
+            wake_tx: self.wake_tx.clone(),
+            paused: Arc::clone(&self.paused),
+            notifications_enabled: Arc::clone(&self.notifications_enabled),
+            batch_tracker: Arc::clone(&self.batch_tracker),
+            store_path: Arc::clone(&self.store_path),
+            job_counter: Arc::clone(&self.job_counter),
+            app: app_handle,
         };
 
-        // Stage 1: Sequential Optical Disc Rip Worker (makemkvcon)
-        let rip_jobs = Arc::clone(&self.jobs);
-        let rip_specs = Arc::clone(&self.specs);
-        let rip_processes = Arc::clone(&self.processes);
-        let encode_tx = self.encode_tx.clone();
-        let rip_app = app_handle.clone();
+        let rip_shared = shared.clone();
+        let rip_wake = self.wake_tx.subscribe();
         tauri::async_runtime::spawn(async move {
-            run_rip_worker(
-                channels.rip_rx,
-                encode_tx,
-                rip_jobs,
-                rip_specs,
-                rip_processes,
-                rip_app,
-            )
-            .await;
+            run_rip_worker(rip_wake, rip_shared).await;
         });
 
-        // Stage 2: Independent Encode + Temp Cleanup Worker (HandBrakeCLI)
-        let enc_jobs = Arc::clone(&self.jobs);
-        let enc_specs = Arc::clone(&self.specs);
-        let enc_processes = Arc::clone(&self.processes);
-        let enc_app = app_handle;
+        let enc_shared = shared;
+        let enc_wake = self.wake_tx.subscribe();
         tauri::async_runtime::spawn(async move {
-            run_encode_worker(
-                channels.encode_rx,
-                enc_jobs,
-                enc_specs,
-                enc_processes,
-                enc_app,
-            )
-            .await;
+            run_encode_worker(enc_wake, enc_shared).await;
         });
     }
 
-    /// Validates, constructs, persists in memory, and dispatches one or more pipeline jobs.
+    fn wake_workers(&self) {
+        self.wake_tx.send_modify(|seq| *seq = seq.wrapping_add(1));
+    }
+
+    async fn persist_queue_async(&self) {
+        let path_opt = self
+            .store_path
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let Some(path) = path_opt else {
+            return;
+        };
+        let jobs = self.jobs.read().await.clone();
+        let specs = self.specs.read().await.clone();
+        let next_counter = self.job_counter.load(Ordering::Relaxed);
+        let _ = write_queue_snapshot_sync(&path, &jobs, &specs, next_counter);
+    }
+
+    /// Validates, constructs, persists to disk, and wakes workers for one or more pipeline jobs.
     pub async fn enqueue_jobs(
         &self,
         requests: Vec<EnqueueJobRequest>,
@@ -749,6 +1130,7 @@ impl PipelineController {
                 custom_preset_name: req.custom_preset_name,
                 drive_device_path: req.drive_device_path,
                 auto_eject_disc: req.auto_eject_disc,
+                notify_on_complete: req.notify_on_complete,
                 track_selection: req.track_selection,
             };
 
@@ -756,25 +1138,155 @@ impl PipelineController {
             self.jobs.write().await.push(job.clone());
             self.emit_event(&PipelineEvent::JobUpdated { job: job.clone() });
 
-            let send_res = match job.mode {
-                PipelineMode::RipOnly | PipelineMode::RipAndEncode => {
-                    self.rip_tx.send(job_id.clone()).await
-                }
-                PipelineMode::EncodeOnly => self.encode_tx.send(job_id.clone()).await,
-            };
-
-            if send_res.is_err() {
-                return Err("Pipeline worker channel is closed.".to_string());
-            }
-
             created_jobs.push(job);
         }
+
+        // Enqueueing new work automatically resumes a restored/paused queue so jobs run right away.
+        self.paused.store(false, Ordering::SeqCst);
+        self.restored_pending_count.store(0, Ordering::Relaxed);
+        self.persist_queue_async().await;
+        self.emit_snapshot().await;
+        self.wake_workers();
 
         Ok(created_jobs)
     }
 
-    /// Retries a `Failed` or `Cancelled` job by resetting its stage and re-dispatching it onto
-    /// the appropriate Tokio worker with refreshed external CLI paths.
+    /// Reorders a pending (`QueuedForRip` or `QueuedForEncode`) job relative to other pending jobs.
+    pub async fn move_job(
+        &self,
+        job_id: &str,
+        action: ReorderAction,
+    ) -> Result<Vec<QueueJob>, String> {
+        let updated = {
+            let mut jobs = self.jobs.write().await;
+            let Some(cur) = jobs.iter().position(|j| j.id == job_id) else {
+                return Err(format!("Queue job not found: {job_id}"));
+            };
+            if !jobs[cur].stage.is_pending() {
+                return Err("Only queued (not yet running) jobs can be reordered.".to_string());
+            }
+
+            let pending_indices: Vec<usize> = jobs
+                .iter()
+                .enumerate()
+                .filter_map(|(i, j)| j.stage.is_pending().then_some(i))
+                .collect();
+
+            let target = match action {
+                ReorderAction::Top => pending_indices.first().copied(),
+                ReorderAction::Bottom => pending_indices.last().copied(),
+                ReorderAction::Up => pending_indices.iter().copied().rev().find(|&i| i < cur),
+                ReorderAction::Down => pending_indices.iter().copied().find(|&i| i > cur),
+            };
+
+            if let Some(dest) = target {
+                if dest != cur {
+                    let item = jobs.remove(cur);
+                    jobs.insert(dest, item);
+                }
+            }
+            jobs.clone()
+        };
+
+        self.persist_queue_async().await;
+        self.emit_snapshot().await;
+        Ok(updated)
+    }
+
+    /// Moves a pending job directly to `target_index` (clamped within the pending jobs band).
+    pub async fn reorder_job_to_index(
+        &self,
+        job_id: &str,
+        target_index: usize,
+    ) -> Result<Vec<QueueJob>, String> {
+        let updated = {
+            let mut jobs = self.jobs.write().await;
+            let Some(cur) = jobs.iter().position(|j| j.id == job_id) else {
+                return Err(format!("Queue job not found: {job_id}"));
+            };
+            if !jobs[cur].stage.is_pending() {
+                return Err("Only queued (not yet running) jobs can be reordered.".to_string());
+            }
+
+            let first_pending = jobs.iter().position(|j| j.stage.is_pending()).unwrap_or(cur);
+            let last_pending = jobs.iter().rposition(|j| j.stage.is_pending()).unwrap_or(cur);
+            let clamped = target_index.clamp(first_pending, last_pending);
+
+            if clamped != cur {
+                let item = jobs.remove(cur);
+                jobs.insert(clamped, item);
+            }
+            jobs.clone()
+        };
+
+        self.persist_queue_async().await;
+        self.emit_snapshot().await;
+        Ok(updated)
+    }
+
+    /// Removes a single queued or terminal job from the queue and persisted storage.
+    pub async fn remove_job(&self, job_id: &str) -> Result<Vec<QueueJob>, String> {
+        let updated = {
+            let mut jobs = self.jobs.write().await;
+            let Some(idx) = jobs.iter().position(|j| j.id == job_id) else {
+                return Err(format!("Queue job not found: {job_id}"));
+            };
+            if jobs[idx].stage.is_running() {
+                return Err("Cancel a running job before removing it from the queue.".to_string());
+            }
+            jobs.remove(idx);
+            jobs.clone()
+        };
+        self.specs.write().await.remove(job_id);
+        self.persist_queue_async().await;
+        self.emit_snapshot().await;
+        Ok(updated)
+    }
+
+    /// Pauses or resumes queue dispatch. When resuming, refreshes binary paths on any pending
+    /// restored jobs so they pick up current CLI installations cleanly.
+    pub async fn set_paused(
+        &self,
+        paused: bool,
+        makemkv_cmd: Option<ResolvedCommand>,
+        handbrake_cmd: Option<ResolvedCommand>,
+    ) -> QueueStateSnapshot {
+        if !paused {
+            let pending_ids: Vec<String> = self
+                .jobs
+                .read()
+                .await
+                .iter()
+                .filter(|j| j.stage.is_pending())
+                .map(|j| j.id.clone())
+                .collect();
+            if !pending_ids.is_empty() {
+                let mut specs = self.specs.write().await;
+                for id in pending_ids {
+                    if let Some(spec) = specs.get_mut(&id) {
+                        if makemkv_cmd.is_some() {
+                            spec.makemkv_cmd = makemkv_cmd.clone();
+                        }
+                        if handbrake_cmd.is_some() {
+                            spec.handbrake_cmd = handbrake_cmd.clone();
+                        }
+                    }
+                }
+            }
+            self.restored_pending_count.store(0, Ordering::Relaxed);
+        }
+
+        self.paused.store(paused, Ordering::SeqCst);
+        self.persist_queue_async().await;
+        let snapshot = self.queue_state().await;
+        self.emit_snapshot().await;
+        if !paused {
+            self.wake_workers();
+        }
+        snapshot
+    }
+
+    /// Retries a `Failed` or `Cancelled` job by resetting its stage and waking the workers.
     pub async fn retry_job(
         &self,
         job_id: &str,
@@ -829,6 +1341,10 @@ impl PipelineController {
             }
         }
 
+        self.paused.store(false, Ordering::SeqCst);
+        self.restored_pending_count.store(0, Ordering::Relaxed);
+        self.persist_queue_async().await;
+
         self.emit_event(&PipelineEvent::LogLine {
             job_id: job.id.clone(),
             stage: job.stage,
@@ -836,16 +1352,8 @@ impl PipelineController {
             line: "--- Retrying job ---".to_string(),
         });
         self.emit_event(&PipelineEvent::JobUpdated { job: job.clone() });
-
-        let send_res = match job.mode {
-            PipelineMode::RipOnly | PipelineMode::RipAndEncode => {
-                self.rip_tx.send(job.id.clone()).await
-            }
-            PipelineMode::EncodeOnly => self.encode_tx.send(job.id.clone()).await,
-        };
-        if send_res.is_err() {
-            return Err("Pipeline worker channel is closed.".to_string());
-        }
+        self.emit_snapshot().await;
+        self.wake_workers();
 
         Ok(job)
     }
@@ -861,9 +1369,24 @@ impl PipelineController {
         }
     }
 
+    async fn emit_snapshot(&self) {
+        let jobs = self.jobs.read().await.clone();
+        let paused = self.paused.load(Ordering::SeqCst);
+        self.emit_event(&PipelineEvent::QueueSnapshot { jobs, paused });
+    }
+
     /// Returns a snapshot of all jobs currently tracked by the queue.
     pub async fn list_jobs(&self) -> Vec<QueueJob> {
         self.jobs.read().await.clone()
+    }
+
+    /// Returns the full queue snapshot including pause & startup-recovery state.
+    pub async fn queue_state(&self) -> QueueStateSnapshot {
+        QueueStateSnapshot {
+            jobs: self.jobs.read().await.clone(),
+            paused: self.paused.load(Ordering::SeqCst),
+            restored_pending_count: self.restored_pending_count.load(Ordering::Relaxed),
+        }
     }
 
     /// Removes completed, cancelled, and failed jobs from the queue list.
@@ -882,7 +1405,10 @@ impl PipelineController {
         for id in removed_ids {
             specs.remove(&id);
         }
+        drop(specs);
 
+        self.persist_queue_async().await;
+        self.emit_snapshot().await;
         remaining
     }
 
@@ -906,28 +1432,11 @@ impl PipelineController {
         }
 
         if let Some(job) = updated_job {
+            self.persist_queue_async().await;
             self.emit_event(&PipelineEvent::JobUpdated { job });
             return true;
         }
         signalled
-    }
-
-    /// Takes ownership of the decoupled worker queue receivers when starting background workers.
-    pub fn take_worker_channels(&self) -> Option<WorkerChannels> {
-        self.worker_channels
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take()
-    }
-
-    /// Sender handle for Stage 1 (Rip Worker).
-    pub fn rip_sender(&self) -> mpsc::Sender<String> {
-        self.rip_tx.clone()
-    }
-
-    /// Sender handle for Stage 2 (Encode Worker).
-    pub fn encode_sender(&self) -> mpsc::Sender<String> {
-        self.encode_tx.clone()
     }
 
     /// Shared reference to the active child-process registry.
@@ -949,8 +1458,65 @@ impl PipelineController {
     }
 
     /// Synchronous shutdown hook invoked on `tauri::RunEvent::Exit`.
+    /// Persists the current queue snapshot and kills all active child processes cleanly.
     pub fn shutdown_sync(&self) {
+        if let Some(path) = self
+            .store_path
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+        {
+            if let (Ok(jobs), Ok(specs)) = (self.jobs.try_read(), self.specs.try_read()) {
+                let next_counter = self.job_counter.load(Ordering::Relaxed);
+                let _ = write_queue_snapshot_sync(&path, &jobs, &specs, next_counter);
+            }
+        }
         self.processes.terminate_all_sync();
+    }
+}
+
+fn write_queue_snapshot_sync(
+    path: &Path,
+    jobs: &[QueueJob],
+    specs: &HashMap<String, JobExecutionSpec>,
+    next_job_counter: u64,
+) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|err| format!("Failed creating queue storage dir: {err}"))?;
+    }
+    let entries: Vec<PersistedQueueEntry> = jobs
+        .iter()
+        .filter_map(|job| {
+            specs.get(&job.id).cloned().map(|spec| PersistedQueueEntry {
+                job: job.clone(),
+                spec,
+            })
+        })
+        .collect();
+    let payload = PersistedQueueFile {
+        version: PERSISTED_QUEUE_VERSION,
+        next_job_counter,
+        entries,
+    };
+    let json = serde_json::to_string_pretty(&payload)
+        .map_err(|err| format!("Failed serializing queue.json: {err}"))?;
+    let tmp_path = path.with_extension("json.tmp");
+    std::fs::write(&tmp_path, json)
+        .map_err(|err| format!("Failed writing temp queue file: {err}"))?;
+    std::fs::rename(&tmp_path, path)
+        .map_err(|err| format!("Failed committing queue.json: {err}"))?;
+    Ok(())
+}
+
+fn staging_dir_for_job(job: &QueueJob) -> PathBuf {
+    if job.mode == PipelineMode::RipOnly {
+        let out_parent = Path::new(&job.output_path)
+            .parent()
+            .unwrap_or_else(|| Path::new(&job.temp_dir));
+        out_parent.join(format!(".ripdaddy-staging-{}", job.id))
+    } else {
+        PathBuf::from(&job.temp_dir).join(&job.id)
     }
 }
 
@@ -964,56 +1530,101 @@ fn fallback_filename(title: &str, ext: &str) -> String {
     format!("{base}.{ext}")
 }
 
-async fn run_rip_worker(
-    mut rip_rx: mpsc::Receiver<String>,
-    encode_tx: mpsc::Sender<String>,
-    jobs: Arc<RwLock<Vec<QueueJob>>>,
-    specs: Arc<RwLock<HashMap<String, JobExecutionSpec>>>,
-    processes: Arc<ProcessRegistry>,
-    app: AppHandle,
-) {
-    while let Some(job_id) = rip_rx.recv().await {
-        let Some(job_snapshot) = get_job_snapshot(&jobs, &job_id).await else {
+/// Atomically finds and transitions the first pending job matching `expected_stage` into `next_stage`.
+async fn claim_next_pending_job(
+    shared: &WorkerShared,
+    expected_stage: JobStage,
+    next_stage: JobStage,
+) -> Option<QueueJob> {
+    let claimed = {
+        let mut guard = shared.jobs.write().await;
+        let job = guard.iter_mut().find(|j| j.stage == expected_stage)?;
+        let from = job.stage;
+        if job.transition_to(next_stage).is_ok() {
+            job.progress.message = None;
+            Some((from, job.clone()))
+        } else {
+            None
+        }
+    };
+
+    if let Some((from, job)) = claimed {
+        shared.persist_queue().await;
+        let _ = shared.app.emit(
+            PIPELINE_EVENT_NAME,
+            &PipelineEvent::StageChanged {
+                job_id: job.id.clone(),
+                from,
+                to: next_stage,
+            },
+        );
+        let _ = shared.app.emit(
+            PIPELINE_EVENT_NAME,
+            &PipelineEvent::JobUpdated { job: job.clone() },
+        );
+        Some(job)
+    } else {
+        None
+    }
+}
+
+async fn run_rip_worker(mut wake_rx: watch::Receiver<u64>, shared: WorkerShared) {
+    loop {
+        let _ = wake_rx.borrow_and_update();
+
+        let job_snapshot = if shared.paused.load(Ordering::SeqCst) {
+            None
+        } else {
+            claim_next_pending_job(&shared, JobStage::QueuedForRip, JobStage::Ripping).await
+        };
+
+        let Some(job_snapshot) = job_snapshot else {
+            if wake_rx.changed().await.is_err() {
+                break;
+            }
             continue;
         };
-        if job_snapshot.stage.is_terminal() {
-            continue;
-        }
-        let Some(spec) = specs.read().await.get(&job_id).cloned() else {
-            mark_job_failed(&jobs, &app, &job_id, "Missing execution spec for rip job.").await;
+
+        let job_id = job_snapshot.id.clone();
+        let Some(spec) = shared.specs.read().await.get(&job_id).cloned() else {
+            mark_job_failed(
+                &shared,
+                &job_id,
+                "Missing execution spec for rip job.",
+                true,
+            )
+            .await;
             continue;
         };
         let Some(base_cmd) = spec.makemkv_cmd else {
-            mark_job_failed(&jobs, &app, &job_id, "makemkvcon binary not configured.").await;
+            mark_job_failed(
+                &shared,
+                &job_id,
+                "makemkvcon binary not configured.",
+                spec.notify_on_complete,
+            )
+            .await;
             continue;
         };
         let (Some(drive_index), Some(title_id)) = (job_snapshot.drive_index, job_snapshot.title_id)
         else {
-            mark_job_failed(&jobs, &app, &job_id, "Missing drive index or title ID.").await;
+            mark_job_failed(
+                &shared,
+                &job_id,
+                "Missing drive index or title ID.",
+                spec.notify_on_complete,
+            )
+            .await;
             continue;
         };
 
-        if !transition_and_emit(&jobs, &app, &job_id, JobStage::Ripping).await {
-            continue;
-        }
-
-        // Stage inside the output folder's parent for RipOnly (same-FS instant rename),
-        // or inside disk-backed `temp_dir/<job_id>` for RipAndEncode.
-        let staging_dir = if job_snapshot.mode == PipelineMode::RipOnly {
-            let out_parent = Path::new(&job_snapshot.output_path)
-                .parent()
-                .unwrap_or_else(|| Path::new(&job_snapshot.temp_dir));
-            out_parent.join(format!(".ripdaddy-staging-{job_id}"))
-        } else {
-            PathBuf::from(&job_snapshot.temp_dir).join(&job_id)
-        };
-
+        let staging_dir = staging_dir_for_job(&job_snapshot);
         if let Err(err) = tokio::fs::create_dir_all(&staging_dir).await {
             mark_job_failed(
-                &jobs,
-                &app,
+                &shared,
                 &job_id,
                 format!("Failed creating staging directory {}: {err}", staging_dir.display()),
+                spec.notify_on_complete,
             )
             .await;
             continue;
@@ -1022,7 +1633,7 @@ async fn run_rip_worker(
         let mounted_cmd = base_cmd.with_flatpak_paths(&[staging_dir.as_path()]);
         let args = makemkv::build_rip_title_args(drive_index, title_id, &staging_dir);
         emit_job_log(
-            &app,
+            &shared.app,
             &job_id,
             JobStage::Ripping,
             "system",
@@ -1030,8 +1641,8 @@ async fn run_rip_worker(
         );
 
         let (prog_tx, mut prog_rx) = mpsc::channel::<JobProgress>(32);
-        let jobs_prog = Arc::clone(&jobs);
-        let app_prog = app.clone();
+        let jobs_prog = Arc::clone(&shared.jobs);
+        let app_prog = shared.app.clone();
         let id_prog = job_id.clone();
         let progress_task = tokio::spawn(async move {
             while let Some(prog) = prog_rx.recv().await {
@@ -1041,14 +1652,14 @@ async fn run_rip_worker(
 
         let mut last_emit = Instant::now() - PROGRESS_THROTTLE;
         let mut last_error_msg: Option<String> = None;
-        let app_log = app.clone();
+        let app_log = shared.app.clone();
         let id_log = job_id.clone();
         let run_result = spawn_and_stream_resolved(
             &mounted_cmd,
             &args,
             &job_id,
             JobStage::Ripping,
-            Arc::clone(&processes),
+            Arc::clone(&shared.processes),
             |stream, line| {
                 if stream == "stdout" {
                     match makemkv::parse_robot_line(&line) {
@@ -1069,7 +1680,13 @@ async fn run_rip_worker(
                             let fields = makemkv::split_robot_fields(&payload);
                             if let Some(text) = fields.get(3).filter(|s| !s.trim().is_empty()) {
                                 last_error_msg = Some(text.clone());
-                                emit_job_log(&app_log, &id_log, JobStage::Ripping, "stdout", text.clone());
+                                emit_job_log(
+                                    &app_log,
+                                    &id_log,
+                                    JobStage::Ripping,
+                                    "stdout",
+                                    text.clone(),
+                                );
                             }
                         }
                         _ => {}
@@ -1097,12 +1714,12 @@ async fn run_rip_worker(
         match run_result {
             Err(PipelineError::Cancelled) => {
                 let _ = tokio::fs::remove_dir_all(&staging_dir).await;
-                let _ = transition_and_emit(&jobs, &app, &job_id, JobStage::Cancelled).await;
+                let _ = transition_and_emit(&shared, &job_id, JobStage::Cancelled).await;
                 continue;
             }
             Err(err) => {
                 let _ = tokio::fs::remove_dir_all(&staging_dir).await;
-                mark_job_failed(&jobs, &app, &job_id, err.to_string()).await;
+                mark_job_failed(&shared, &job_id, err.to_string(), spec.notify_on_complete).await;
                 continue;
             }
             Ok(status) if !status.success() => {
@@ -1111,13 +1728,13 @@ async fn run_rip_worker(
                     Some(msg) => format!("makemkvcon failed (exit {:?}): {msg}", status.code()),
                     None => format!("makemkvcon exited with status {:?}", status.code()),
                 };
-                mark_job_failed(&jobs, &app, &job_id, detail).await;
+                mark_job_failed(&shared, &job_id, detail, spec.notify_on_complete).await;
                 continue;
             }
             Ok(_) => {}
         }
 
-        if get_job_snapshot(&jobs, &job_id)
+        if get_job_snapshot(&shared.jobs, &job_id)
             .await
             .map_or(true, |j| j.stage.is_terminal())
         {
@@ -1128,10 +1745,10 @@ async fn run_rip_worker(
         let Some(ripped_mkv) = find_largest_mkv(&staging_dir).await else {
             let _ = tokio::fs::remove_dir_all(&staging_dir).await;
             mark_job_failed(
-                &jobs,
-                &app,
+                &shared,
                 &job_id,
                 "makemkvcon finished but no .mkv file was produced in staging directory.",
+                spec.notify_on_complete,
             )
             .await;
             continue;
@@ -1139,8 +1756,32 @@ async fn run_rip_worker(
 
         if spec.auto_eject_disc {
             let dev = spec.drive_device_path.clone();
+            let disc_label = if job_snapshot.disc_name.trim().is_empty() {
+                job_snapshot.title_name.clone()
+            } else {
+                job_snapshot.disc_name.clone()
+            };
+            let should_send_eject_alert = job_snapshot.mode == PipelineMode::RipAndEncode
+                && spec.notify_on_complete
+                && shared.notifications_enabled.load(Ordering::Relaxed);
+            let _ = shared.app.emit(
+                PIPELINE_EVENT_NAME,
+                &PipelineEvent::DiscEjected {
+                    job_id: job_id.clone(),
+                    disc_name: disc_label.clone(),
+                },
+            );
             tokio::spawn(async move {
                 makemkv::eject_optical_drive(dev.as_deref()).await;
+                if should_send_eject_alert {
+                    let _ = system::send_desktop_notification(
+                        "RipDaddy · Disc Ready to Swap",
+                        &format!(
+                            "{disc_label} finished ripping and ejected. Insert the next disc while encoding continues."
+                        ),
+                    )
+                    .await;
+                }
             });
         }
 
@@ -1148,46 +1789,77 @@ async fn run_rip_worker(
             let dest = PathBuf::from(&job_snapshot.output_path);
             if let Err(err) = move_file_safe(&ripped_mkv, &dest).await {
                 let _ = tokio::fs::remove_dir_all(&staging_dir).await;
-                mark_job_failed(&jobs, &app, &job_id, format!("Failed moving MKV: {err}")).await;
+                mark_job_failed(
+                    &shared,
+                    &job_id,
+                    format!("Failed moving MKV: {err}"),
+                    spec.notify_on_complete,
+                )
+                .await;
                 continue;
             }
             let _ = tokio::fs::remove_dir_all(&staging_dir).await;
-            let _ = transition_and_emit(&jobs, &app, &job_id, JobStage::Completed).await;
+            if transition_and_emit(&shared, &job_id, JobStage::Completed).await {
+                shared
+                    .record_terminal_outcome(
+                        &job_snapshot,
+                        true,
+                        spec.notify_on_complete,
+                        spec.auto_eject_disc,
+                    )
+                    .await;
+            }
         } else {
             // Stage 1 complete -> hand off to Stage 2 Encode Worker immediately
             {
-                let mut guard = jobs.write().await;
+                let mut guard = shared.jobs.write().await;
                 if let Some(job) = guard.iter_mut().find(|j| j.id == job_id) {
                     job.temp_mkv_path = Some(ripped_mkv.to_string_lossy().into_owned());
                 }
             }
-            if transition_and_emit(&jobs, &app, &job_id, JobStage::QueuedForEncode).await {
-                let _ = encode_tx.send(job_id.clone()).await;
+            if transition_and_emit(&shared, &job_id, JobStage::QueuedForEncode).await {
+                shared.wake_workers();
             }
         }
     }
 }
 
-async fn run_encode_worker(
-    mut encode_rx: mpsc::Receiver<String>,
-    jobs: Arc<RwLock<Vec<QueueJob>>>,
-    specs: Arc<RwLock<HashMap<String, JobExecutionSpec>>>,
-    processes: Arc<ProcessRegistry>,
-    app: AppHandle,
-) {
-    while let Some(job_id) = encode_rx.recv().await {
-        let Some(job_snapshot) = get_job_snapshot(&jobs, &job_id).await else {
+async fn run_encode_worker(mut wake_rx: watch::Receiver<u64>, shared: WorkerShared) {
+    loop {
+        let _ = wake_rx.borrow_and_update();
+
+        let job_snapshot = if shared.paused.load(Ordering::SeqCst) {
+            None
+        } else {
+            claim_next_pending_job(&shared, JobStage::QueuedForEncode, JobStage::Encoding).await
+        };
+
+        let Some(job_snapshot) = job_snapshot else {
+            if wake_rx.changed().await.is_err() {
+                break;
+            }
             continue;
         };
-        if job_snapshot.stage.is_terminal() {
-            continue;
-        }
-        let Some(spec) = specs.read().await.get(&job_id).cloned() else {
-            mark_job_failed(&jobs, &app, &job_id, "Missing execution spec for encode job.").await;
+
+        let job_id = job_snapshot.id.clone();
+        let Some(spec) = shared.specs.read().await.get(&job_id).cloned() else {
+            mark_job_failed(
+                &shared,
+                &job_id,
+                "Missing execution spec for encode job.",
+                true,
+            )
+            .await;
             continue;
         };
         let Some(base_cmd) = spec.handbrake_cmd else {
-            mark_job_failed(&jobs, &app, &job_id, "HandBrakeCLI binary not configured.").await;
+            mark_job_failed(
+                &shared,
+                &job_id,
+                "HandBrakeCLI binary not configured.",
+                spec.notify_on_complete,
+            )
+            .await;
             continue;
         };
 
@@ -1197,7 +1869,13 @@ async fn run_encode_worker(
             PipelineMode::RipOnly => None,
         };
         let Some(input_str) = input_str else {
-            mark_job_failed(&jobs, &app, &job_id, "Missing input video path for encode.").await;
+            mark_job_failed(
+                &shared,
+                &job_id,
+                "Missing input video path for encode.",
+                spec.notify_on_complete,
+            )
+            .await;
             continue;
         };
 
@@ -1206,18 +1884,14 @@ async fn run_encode_worker(
         if let Some(parent) = output_path.parent() {
             if let Err(err) = tokio::fs::create_dir_all(parent).await {
                 mark_job_failed(
-                    &jobs,
-                    &app,
+                    &shared,
                     &job_id,
                     format!("Failed creating output directory {}: {err}", parent.display()),
+                    spec.notify_on_complete,
                 )
                 .await;
                 continue;
             }
-        }
-
-        if !transition_and_emit(&jobs, &app, &job_id, JobStage::Encoding).await {
-            continue;
         }
 
         let args = if let (Some(custom_file), Some(custom_name)) = (
@@ -1267,7 +1941,7 @@ async fn run_encode_worker(
         }
         let mounted_cmd = base_cmd.with_flatpak_paths(&mount_dirs);
         emit_job_log(
-            &app,
+            &shared.app,
             &job_id,
             JobStage::Encoding,
             "system",
@@ -1275,8 +1949,8 @@ async fn run_encode_worker(
         );
 
         let (prog_tx, mut prog_rx) = mpsc::channel::<JobProgress>(32);
-        let jobs_prog = Arc::clone(&jobs);
-        let app_prog = app.clone();
+        let jobs_prog = Arc::clone(&shared.jobs);
+        let app_prog = shared.app.clone();
         let id_prog = job_id.clone();
         let progress_task = tokio::spawn(async move {
             while let Some(prog) = prog_rx.recv().await {
@@ -1287,14 +1961,14 @@ async fn run_encode_worker(
         let mut parser = ProgressStreamParser::new();
         let mut last_emit = Instant::now() - PROGRESS_THROTTLE;
         let mut last_stderr: Option<String> = None;
-        let app_log = app.clone();
+        let app_log = shared.app.clone();
         let id_log = job_id.clone();
         let run_result = spawn_and_stream_resolved(
             &mounted_cmd,
             &args,
             &job_id,
             JobStage::Encoding,
-            Arc::clone(&processes),
+            Arc::clone(&shared.processes),
             |stream, line| {
                 if stream == "stdout" {
                     if let Ok(Some(enc)) = parser.push_line(&line) {
@@ -1340,12 +2014,12 @@ async fn run_encode_worker(
         match run_result {
             Err(PipelineError::Cancelled) => {
                 let _ = PipelineController::cleanup_temp_file(&output_path).await;
-                let _ = transition_and_emit(&jobs, &app, &job_id, JobStage::Cancelled).await;
+                let _ = transition_and_emit(&shared, &job_id, JobStage::Cancelled).await;
                 continue;
             }
             Err(err) => {
                 let _ = PipelineController::cleanup_temp_file(&output_path).await;
-                mark_job_failed(&jobs, &app, &job_id, err.to_string()).await;
+                mark_job_failed(&shared, &job_id, err.to_string(), spec.notify_on_complete).await;
                 continue;
             }
             Ok(status) if !status.success() => {
@@ -1354,13 +2028,13 @@ async fn run_encode_worker(
                     Some(msg) => format!("HandBrakeCLI failed (exit {:?}): {msg}", status.code()),
                     None => format!("HandBrakeCLI exited with status {:?}", status.code()),
                 };
-                mark_job_failed(&jobs, &app, &job_id, detail).await;
+                mark_job_failed(&shared, &job_id, detail, spec.notify_on_complete).await;
                 continue;
             }
             Ok(_) => {}
         }
 
-        if get_job_snapshot(&jobs, &job_id)
+        if get_job_snapshot(&shared.jobs, &job_id)
             .await
             .map_or(true, |j| j.stage.is_terminal())
         {
@@ -1371,17 +2045,22 @@ async fn run_encode_worker(
         // Stage 3: Temp MKV Cleanup (only for RipAndEncode when keep_temp_mkv is false)
         if job_snapshot.mode == PipelineMode::RipAndEncode && !job_snapshot.keep_temp_mkv {
             if let Some(ref temp_mkv) = job_snapshot.temp_mkv_path {
-                let _ = transition_and_emit(&jobs, &app, &job_id, JobStage::CleaningTemp).await;
+                let _ = transition_and_emit(&shared, &job_id, JobStage::CleaningTemp).await;
                 let temp_path = Path::new(temp_mkv);
                 if let Err(err) = PipelineController::cleanup_temp_file(temp_path).await {
-                    mark_job_failed(&jobs, &app, &job_id, format!("Temp cleanup failed: {err}"))
-                        .await;
+                    mark_job_failed(
+                        &shared,
+                        &job_id,
+                        format!("Temp cleanup failed: {err}"),
+                        spec.notify_on_complete,
+                    )
+                    .await;
                     continue;
                 }
                 if let Some(temp_parent) = temp_path.parent() {
                     let _ = tokio::fs::remove_dir(temp_parent).await;
                 }
-                let _ = app.emit(
+                let _ = shared.app.emit(
                     PIPELINE_EVENT_NAME,
                     &PipelineEvent::TempCleaned {
                         job_id: job_id.clone(),
@@ -1391,7 +2070,11 @@ async fn run_encode_worker(
             }
         }
 
-        let _ = transition_and_emit(&jobs, &app, &job_id, JobStage::Completed).await;
+        if transition_and_emit(&shared, &job_id, JobStage::Completed).await {
+            shared
+                .record_terminal_outcome(&job_snapshot, true, spec.notify_on_complete, false)
+                .await;
+        }
     }
 }
 
@@ -1403,14 +2086,9 @@ async fn get_job_snapshot(jobs: &Arc<RwLock<Vec<QueueJob>>>, job_id: &str) -> Op
         .cloned()
 }
 
-async fn transition_and_emit(
-    jobs: &Arc<RwLock<Vec<QueueJob>>>,
-    app: &AppHandle,
-    job_id: &str,
-    next: JobStage,
-) -> bool {
+async fn transition_and_emit(shared: &WorkerShared, job_id: &str, next: JobStage) -> bool {
     let transition_info = {
-        let mut guard = jobs.write().await;
+        let mut guard = shared.jobs.write().await;
         if let Some(job) = guard.iter_mut().find(|j| j.id == job_id) {
             let from = job.stage;
             if job.transition_to(next).is_ok() {
@@ -1424,7 +2102,8 @@ async fn transition_and_emit(
     };
 
     if let Some((from, job)) = transition_info {
-        let _ = app.emit(
+        shared.persist_queue().await;
+        let _ = shared.app.emit(
             PIPELINE_EVENT_NAME,
             &PipelineEvent::StageChanged {
                 job_id: job_id.to_string(),
@@ -1432,7 +2111,9 @@ async fn transition_and_emit(
                 to: next,
             },
         );
-        let _ = app.emit(PIPELINE_EVENT_NAME, &PipelineEvent::JobUpdated { job });
+        let _ = shared
+            .app
+            .emit(PIPELINE_EVENT_NAME, &PipelineEvent::JobUpdated { job });
         true
     } else {
         false
@@ -1486,14 +2167,14 @@ async fn update_job_progress(
 }
 
 async fn mark_job_failed(
-    jobs: &Arc<RwLock<Vec<QueueJob>>>,
-    app: &AppHandle,
+    shared: &WorkerShared,
     job_id: &str,
     error_message: impl Into<String>,
+    notify_allowed: bool,
 ) {
     let msg = error_message.into();
     let updated = {
-        let mut guard = jobs.write().await;
+        let mut guard = shared.jobs.write().await;
         if let Some(job) = guard.iter_mut().find(|j| j.id == job_id) {
             job.error = Some(msg);
             if job
@@ -1512,7 +2193,14 @@ async fn mark_job_failed(
     };
 
     if let Some(job) = updated {
-        let _ = app.emit(PIPELINE_EVENT_NAME, &PipelineEvent::JobUpdated { job });
+        shared.persist_queue().await;
+        let _ = shared.app.emit(
+            PIPELINE_EVENT_NAME,
+            &PipelineEvent::JobUpdated { job: job.clone() },
+        );
+        shared
+            .record_terminal_outcome(&job, false, notify_allowed, false)
+            .await;
     }
 }
 
@@ -1614,6 +2302,23 @@ mod tests {
         }
     }
 
+    fn sample_spec() -> JobExecutionSpec {
+        JobExecutionSpec {
+            makemkv_cmd: None,
+            handbrake_cmd: Some(ResolvedCommand {
+                program: "/usr/bin/HandBrakeCLI".to_string(),
+                prefix_args: Vec::new(),
+            }),
+            quality_profile: None,
+            custom_preset_file: None,
+            custom_preset_name: None,
+            drive_device_path: None,
+            auto_eject_disc: false,
+            notify_on_complete: true,
+            track_selection: TrackSelectionOptions::default(),
+        }
+    }
+
     #[test]
     fn valid_rip_and_encode_pipeline_transitions() {
         let mut job = sample_job(PipelineMode::RipAndEncode);
@@ -1668,5 +2373,86 @@ mod tests {
         ];
         let unique2 = ensure_unique_output_path("/videos/The Matrix (1999).mkv", &existing2);
         assert_eq!(unique2, "/videos/The Matrix (1999) (3).mkv");
+    }
+
+    #[tokio::test]
+    async fn reorders_pending_jobs_without_displacing_running_jobs() {
+        let ctrl = PipelineController::new();
+        let mut j0 = sample_job(PipelineMode::EncodeOnly);
+        j0.id = "job-running".to_string();
+        j0.stage = JobStage::Encoding;
+
+        let mut j1 = sample_job(PipelineMode::EncodeOnly);
+        j1.id = "job-a".to_string();
+        let mut j2 = sample_job(PipelineMode::EncodeOnly);
+        j2.id = "job-b".to_string();
+        let mut j3 = sample_job(PipelineMode::EncodeOnly);
+        j3.id = "job-urgent".to_string();
+
+        {
+            let mut guard = ctrl.jobs.write().await;
+            *guard = vec![j0, j1, j2, j3];
+        }
+
+        // Move urgent job to top of pending queue (stays right after running job-running)
+        let after_top = ctrl
+            .move_job("job-urgent", ReorderAction::Top)
+            .await
+            .expect("move top");
+        let ids: Vec<&str> = after_top.iter().map(|j| j.id.as_str()).collect();
+        assert_eq!(ids, vec!["job-running", "job-urgent", "job-a", "job-b"]);
+
+        // Cannot reorder running job
+        assert!(ctrl.move_job("job-running", ReorderAction::Down).await.is_err());
+
+        // Move job-b up one slot
+        let after_up = ctrl
+            .move_job("job-b", ReorderAction::Up)
+            .await
+            .expect("move up");
+        let ids2: Vec<&str> = after_up.iter().map(|j| j.id.as_str()).collect();
+        assert_eq!(ids2, vec!["job-running", "job-urgent", "job-b", "job-a"]);
+    }
+
+    #[tokio::test]
+    async fn persists_and_recovers_interrupted_jobs_across_restarts() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let temp_file = std::env::temp_dir().join(format!("ripdaddy-queue-test-{stamp}.json"));
+
+        let mut active_enc = sample_job(PipelineMode::EncodeOnly);
+        active_enc.id = "job-10".to_string();
+        active_enc.stage = JobStage::Encoding;
+        active_enc.output_path = std::env::temp_dir()
+            .join(format!("ripdaddy-nonexistent-out-{stamp}.mkv"))
+            .to_string_lossy()
+            .into_owned();
+
+        let mut queued_enc = sample_job(PipelineMode::EncodeOnly);
+        queued_enc.id = "job-11".to_string();
+        queued_enc.stage = JobStage::QueuedForEncode;
+
+        let mut specs = HashMap::new();
+        specs.insert(active_enc.id.clone(), sample_spec());
+        specs.insert(queued_enc.id.clone(), sample_spec());
+
+        write_queue_snapshot_sync(&temp_file, &[active_enc, queued_enc], &specs, 12)
+            .expect("write snapshot");
+
+        let restored_ctrl = PipelineController::new();
+        restored_ctrl.set_store_path(temp_file.clone());
+        let pending = restored_ctrl.restore_persisted_queue_sync();
+        assert_eq!(pending, 2);
+
+        let state = restored_ctrl.queue_state().await;
+        assert!(state.paused);
+        assert_eq!(state.restored_pending_count, 2);
+        assert_eq!(state.jobs.len(), 2);
+        assert_eq!(state.jobs[0].stage, JobStage::QueuedForEncode);
+        assert_eq!(state.jobs[1].stage, JobStage::QueuedForEncode);
+
+        let _ = std::fs::remove_file(&temp_file);
     }
 }

@@ -1,8 +1,9 @@
 //! HandBrakeCLI Resolution × Delivery quality matrix, multiline `--json` progress parser,
 //! `--preset-list` parser, and 10-second sample preview clip generator.
 
-use crate::detect::ResolvedCommand;
+use crate::detect::{self, ResolvedCommand};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -11,6 +12,8 @@ use tokio::process::Command;
 use tokio::time::timeout;
 
 const PRESET_LIST_TIMEOUT: Duration = Duration::from_secs(15);
+const ENCODER_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+const VAINFO_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 const SAMPLE_CLIP_TIMEOUT: Duration = Duration::from_secs(180);
 
 /// Errors produced while parsing HandBrakeCLI output or invoking the CLI.
@@ -80,6 +83,18 @@ pub enum VideoEncoder {
 }
 
 impl VideoEncoder {
+    /// All supported video encoders exposed in RipDaddy's Quality Matrix.
+    pub const ALL: [VideoEncoder; 8] = [
+        VideoEncoder::X26510Bit,
+        VideoEncoder::X265,
+        VideoEncoder::X264,
+        VideoEncoder::SvtAv110Bit,
+        VideoEncoder::NvencH265,
+        VideoEncoder::VaapiH265,
+        VideoEncoder::QsvH265,
+        VideoEncoder::VtH265,
+    ];
+
     /// Exact `HandBrakeCLI -e` encoder identifier.
     pub fn cli_name(self) -> &'static str {
         match self {
@@ -93,6 +108,55 @@ impl VideoEncoder {
             VideoEncoder::VtH265 => "vt_h265",
         }
     }
+
+    /// Friendly display name for badges and summaries.
+    pub fn display_name(self) -> &'static str {
+        match self {
+            VideoEncoder::X26510Bit => "x265 10-bit",
+            VideoEncoder::X265 => "x265",
+            VideoEncoder::X264 => "x264",
+            VideoEncoder::SvtAv110Bit => "SVT-AV1 10-bit",
+            VideoEncoder::NvencH265 => "NVENC H.265",
+            VideoEncoder::VaapiH265 => "VAAPI H.265",
+            VideoEncoder::QsvH265 => "QSV H.265",
+            VideoEncoder::VtH265 => "VT H.265",
+        }
+    }
+
+    /// Returns `true` for hardware GPU encoders (`nvenc_h265`, `vaapi_h265`, `qsv_h265`, `vt_h265`).
+    pub fn is_hardware(self) -> bool {
+        matches!(
+            self,
+            VideoEncoder::NvencH265
+                | VideoEncoder::VaapiH265
+                | VideoEncoder::QsvH265
+                | VideoEncoder::VtH265
+        )
+    }
+}
+
+/// Availability and hardware probe details for a single RipDaddy `VideoEncoder`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EncoderProbeInfo {
+    pub encoder: VideoEncoder,
+    pub cli_name: String,
+    pub is_hardware: bool,
+    pub supported: bool,
+    pub cli_listed: bool,
+    pub hardware_detected: bool,
+    pub reason: String,
+}
+
+/// Complete capability report returned by `probe_video_encoders`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EncoderCapabilities {
+    pub handbrake_available: bool,
+    pub handbrake_version: Option<String>,
+    pub encoders: Vec<EncoderProbeInfo>,
+    pub recommended_gpu_encoder: Option<VideoEncoder>,
+    pub summary: String,
 }
 
 /// Audio encoding / passthrough strategy.
@@ -841,6 +905,434 @@ pub async fn list_presets(resolved: &ResolvedCommand) -> Result<Vec<HandBrakePre
     parse_preset_list(&combined)
 }
 
+/// Parses the `-e, --encoder` section from `HandBrakeCLI --help` output into a set of
+/// lowercase encoder identifiers (e.g. `x265_10bit`, `nvenc_h265`, `vaapi_h265`, `qsv_h265`, `vt_h265`).
+pub fn parse_handbrake_help_encoders(help_output: &str) -> HashSet<String> {
+    let mut found = HashSet::new();
+    let mut in_encoder_section = false;
+
+    for raw_line in help_output.lines() {
+        let trimmed = raw_line.trim();
+
+        if !in_encoder_section {
+            if trimmed.contains("--encoder")
+                && (trimmed.contains("Select video encoder")
+                    || trimmed.contains("video encoder:")
+                    || trimmed.starts_with("-e,"))
+            {
+                in_encoder_section = true;
+                // Handle any inline token after `:` on the same line if present
+                if let Some((_, after)) = trimmed.split_once("Select video encoder:") {
+                    collect_encoder_tokens(after, &mut found);
+                }
+            }
+            continue;
+        }
+
+        // Stop once we reach the next CLI flag or a new help section header
+        if trimmed.is_empty() {
+            if !found.is_empty() {
+                break;
+            }
+            continue;
+        }
+        if trimmed.starts_with('-') || (trimmed.ends_with(':') && !trimmed.contains(' ')) {
+            break;
+        }
+
+        // Only consume indented encoder listing lines
+        let indent = raw_line.len() - raw_line.trim_start().len();
+        if indent < 4 {
+            break;
+        }
+
+        collect_encoder_tokens(trimmed, &mut found);
+    }
+
+    found
+}
+
+fn collect_encoder_tokens(segment: &str, out: &mut HashSet<String>) {
+    for raw_token in segment.split(|c: char| c.is_whitespace() || c == ',' || c == ';') {
+        let token = raw_token.trim_matches(|c: char| matches!(c, '(' | ')' | '[' | ']' | ':'));
+        if token.is_empty() || token.eq_ignore_ascii_case("default") {
+            continue;
+        }
+        let valid = token
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            && token.chars().any(|c| c.is_ascii_alphabetic());
+        if valid {
+            out.insert(token.to_ascii_lowercase());
+        }
+    }
+}
+
+/// Hardware probe snapshot for the current host machine.
+#[derive(Debug, Clone, Copy, Default)]
+struct HostGpuSnapshot {
+    nvidia_present: bool,
+    dri_render_present: bool,
+    intel_gpu_present: bool,
+    vaapi_hevc_verified: Option<bool>,
+}
+
+async fn probe_host_gpu_snapshot() -> HostGpuSnapshot {
+    #[cfg(target_os = "linux")]
+    {
+        let nvidia_present = Path::new("/dev/nvidiactl").exists()
+            || Path::new("/dev/nvidia0").exists()
+            || detect_linux_pci_vendor("0x10de");
+
+        let dri_render_present = std::fs::read_dir("/dev/dri")
+            .ok()
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .any(|e| e.file_name().to_string_lossy().starts_with("renderD"))
+            })
+            .unwrap_or(false);
+
+        let intel_gpu_present = detect_linux_drm_vendor("0x8086")
+            || (dri_render_present && detect_linux_pci_vendor("0x8086"));
+
+        let vaapi_hevc_verified = if dri_render_present {
+            probe_linux_vainfo_hevc_encode().await
+        } else {
+            Some(false)
+        };
+
+        HostGpuSnapshot {
+            nvidia_present,
+            dri_render_present,
+            intel_gpu_present,
+            vaapi_hevc_verified,
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        HostGpuSnapshot::default()
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn detect_linux_pci_vendor(target_vendor: &str) -> bool {
+    let Ok(entries) = std::fs::read_dir("/sys/bus/pci/devices") else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let dir = entry.path();
+        let Ok(class_raw) = std::fs::read_to_string(dir.join("class")) else {
+            continue;
+        };
+        // PCI class 0x03xxxx = Display controller (VGA / 3D / Display)
+        if !class_raw.trim().starts_with("0x03") {
+            continue;
+        }
+        if let Ok(vendor_raw) = std::fs::read_to_string(dir.join("vendor")) {
+            if vendor_raw.trim().eq_ignore_ascii_case(target_vendor) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+#[cfg(target_os = "linux")]
+fn detect_linux_drm_vendor(target_vendor: &str) -> bool {
+    let Ok(entries) = std::fs::read_dir("/sys/class/drm") else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if !name.to_string_lossy().starts_with("renderD") {
+            continue;
+        }
+        if let Ok(vendor_raw) = std::fs::read_to_string(entry.path().join("device/vendor")) {
+            if vendor_raw.trim().eq_ignore_ascii_case(target_vendor) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+#[cfg(target_os = "linux")]
+async fn probe_linux_vainfo_hevc_encode() -> Option<bool> {
+    let resolved = detect::locate_optional_tool("vainfo")?;
+    let mut cmd = Command::new(&resolved.program);
+    cmd.args(&resolved.prefix_args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let child = cmd.spawn().ok()?;
+    let out = timeout(VAINFO_PROBE_TIMEOUT, child.wait_with_output())
+        .await
+        .ok()?
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let has_hevc_enc = text.lines().any(|line| {
+        (line.contains("VAProfileHEVCMain") || line.contains("VAProfileHEVCMain10"))
+            && line.contains("VAEntrypointEncSlice")
+    });
+    Some(has_hevc_enc)
+}
+
+/// Evaluates `EncoderCapabilities` given a parsed set of `HandBrakeCLI --help` encoders,
+/// host OS identifier, and hardware snapshot. Pure logic separated for deterministic unit tests.
+fn evaluate_encoder_capabilities(
+    handbrake_available: bool,
+    handbrake_version: Option<String>,
+    cli_encoders: &HashSet<String>,
+    os: &str,
+    gpu: HostGpuSnapshot,
+) -> EncoderCapabilities {
+    let mut encoders = Vec::with_capacity(VideoEncoder::ALL.len());
+
+    for enc in VideoEncoder::ALL {
+        let cli_name = enc.cli_name().to_string();
+        let is_hardware = enc.is_hardware();
+        let cli_listed = handbrake_available && cli_encoders.contains(&cli_name);
+
+        let (hardware_detected, supported, reason) = if !handbrake_available {
+            (
+                false,
+                false,
+                "HandBrakeCLI is not installed or unavailable.".to_string(),
+            )
+        } else if !is_hardware {
+            if cli_listed {
+                (
+                    true,
+                    true,
+                    "Software CPU encoder supported by HandBrakeCLI.".to_string(),
+                )
+            } else {
+                (
+                    false,
+                    false,
+                    format!("{cli_name} is not enabled in this HandBrakeCLI build."),
+                )
+            }
+        } else {
+            match enc {
+                VideoEncoder::NvencH265 => {
+                    if os == "macos" {
+                        (false, false, "NVIDIA NVENC is not supported on macOS.".to_string())
+                    } else if !cli_listed {
+                        (
+                            gpu.nvidia_present,
+                            false,
+                            "Not available in HandBrakeCLI (no compatible NVIDIA NVENC runtime detected).".to_string(),
+                        )
+                    } else if os == "linux" && !gpu.nvidia_present {
+                        (
+                            false,
+                            false,
+                            "Listed by HandBrakeCLI, but no NVIDIA GPU device was detected.".to_string(),
+                        )
+                    } else {
+                        (
+                            true,
+                            true,
+                            "NVIDIA NVENC H.265 hardware encoding ready.".to_string(),
+                        )
+                    }
+                }
+                VideoEncoder::VaapiH265 => {
+                    if os != "linux" {
+                        (false, false, "VAAPI hardware encoding is Linux-only.".to_string())
+                    } else if !cli_listed {
+                        (
+                            gpu.dri_render_present,
+                            false,
+                            "vaapi_h265 is not enabled in this HandBrakeCLI build.".to_string(),
+                        )
+                    } else if !gpu.dri_render_present {
+                        (
+                            false,
+                            false,
+                            "No /dev/dri/renderD* GPU render node detected.".to_string(),
+                        )
+                    } else if gpu.vaapi_hevc_verified == Some(false) {
+                        (
+                            false,
+                            false,
+                            "DRI device found, but vainfo reports no HEVC encode entrypoint.".to_string(),
+                        )
+                    } else {
+                        (
+                            true,
+                            true,
+                            "Linux VAAPI H.265 hardware encoding ready.".to_string(),
+                        )
+                    }
+                }
+                VideoEncoder::QsvH265 => {
+                    if os == "macos" {
+                        (
+                            false,
+                            false,
+                            "Intel QuickSync is unavailable on macOS (use Apple VideoToolbox).".to_string(),
+                        )
+                    } else if !cli_listed {
+                        (
+                            gpu.intel_gpu_present,
+                            false,
+                            "Not available in HandBrakeCLI (Intel QSV / oneVPL runtime not active).".to_string(),
+                        )
+                    } else if os == "linux" && !gpu.intel_gpu_present {
+                        (
+                            false,
+                            false,
+                            "Listed by HandBrakeCLI, but no Intel GPU render device was detected.".to_string(),
+                        )
+                    } else {
+                        (
+                            true,
+                            true,
+                            "Intel QuickSync H.265 hardware encoding ready.".to_string(),
+                        )
+                    }
+                }
+                VideoEncoder::VtH265 => {
+                    if os != "macos" {
+                        (
+                            false,
+                            false,
+                            "Apple VideoToolbox is macOS-only.".to_string(),
+                        )
+                    } else if !cli_listed {
+                        (
+                            false,
+                            false,
+                            "vt_h265 is not enabled in this HandBrakeCLI build.".to_string(),
+                        )
+                    } else {
+                        (
+                            true,
+                            true,
+                            "Apple VideoToolbox H.265 hardware encoding ready.".to_string(),
+                        )
+                    }
+                }
+                _ => (cli_listed, cli_listed, String::new()),
+            }
+        };
+
+        encoders.push(EncoderProbeInfo {
+            encoder: enc,
+            cli_name,
+            is_hardware,
+            supported,
+            cli_listed,
+            hardware_detected,
+            reason,
+        });
+    }
+
+    let gpu_priority = if os == "macos" {
+        [
+            VideoEncoder::VtH265,
+            VideoEncoder::NvencH265,
+            VideoEncoder::QsvH265,
+            VideoEncoder::VaapiH265,
+        ]
+    } else {
+        [
+            VideoEncoder::NvencH265,
+            VideoEncoder::QsvH265,
+            VideoEncoder::VaapiH265,
+            VideoEncoder::VtH265,
+        ]
+    };
+
+    let recommended_gpu_encoder = gpu_priority.into_iter().find(|candidate| {
+        encoders
+            .iter()
+            .any(|info| info.encoder == *candidate && info.supported)
+    });
+
+    let supported_gpu_names: Vec<&'static str> = encoders
+        .iter()
+        .filter(|e| e.is_hardware && e.supported)
+        .map(|e| e.encoder.display_name())
+        .collect();
+
+    let summary = if !handbrake_available {
+        "Install HandBrakeCLI to probe GPU & CPU encoders.".to_string()
+    } else if supported_gpu_names.is_empty() {
+        "CPU encoding only (no supported GPU H.265 encoder detected).".to_string()
+    } else {
+        format!("GPU ready: {}", supported_gpu_names.join(", "))
+    };
+
+    EncoderCapabilities {
+        handbrake_available,
+        handbrake_version,
+        encoders,
+        recommended_gpu_encoder,
+        summary,
+    }
+}
+
+/// Probes `HandBrakeCLI --help` and local GPU hardware to determine which software
+/// and hardware encoders (`nvenc_h265`, `vaapi_h265`, `qsv_h265`, `vt_h265`) are usable.
+pub async fn probe_encoders(
+    resolved: Option<&ResolvedCommand>,
+    version: Option<String>,
+) -> EncoderCapabilities {
+    let Some(resolved_cmd) = resolved else {
+        return evaluate_encoder_capabilities(
+            false,
+            version,
+            &HashSet::new(),
+            std::env::consts::OS,
+            HostGpuSnapshot::default(),
+        );
+    };
+
+    let help_future = async {
+        let mut cmd = Command::new(&resolved_cmd.program);
+        cmd.args(&resolved_cmd.prefix_args)
+            .arg("--help")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        configure_platform_command(&mut cmd);
+
+        let child = cmd.spawn().ok()?;
+        let output = timeout(ENCODER_PROBE_TIMEOUT, child.wait_with_output())
+            .await
+            .ok()?
+            .ok()?;
+
+        let combined = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Some(parse_handbrake_help_encoders(&combined))
+    };
+
+    let (cli_opt, gpu_snapshot) = tokio::join!(help_future, probe_host_gpu_snapshot());
+    let cli_encoders = cli_opt.unwrap_or_default();
+
+    evaluate_encoder_capabilities(
+        true,
+        version,
+        &cli_encoders,
+        std::env::consts::OS,
+        gpu_snapshot,
+    )
+}
+
 /// Generates a 10-second WebView-playable MP4 sample clip using the user's selected
 /// `QualityProfile` (resolution, RF quality, decomb) so they can inspect quality & crop
 /// directly inside the right-hand Preview drawer before queuing a full encode.
@@ -1026,5 +1518,55 @@ Matroska/
         assert_eq!(presets[1].name, "Fast 1080p30");
         assert!(presets[1].is_default);
         assert_eq!(presets[2].category, "Matroska");
+    }
+
+    #[test]
+    fn parses_handbrake_help_video_encoders_and_evaluates_gpu_support() {
+        let sample_help = "\
+Video Options -----------------------------------------------------------------
+
+    -e, --encoder <string>  Select video encoder:
+                                x264
+                                x264_10bit
+                                nvenc_h264
+                                nvenc_h265
+                                vaapi_h265
+                                x265
+                                x265_10bit
+                                svt_av1_10bit
+        --encoder-preset <string>
+                            Adjust video encoding settings for a particular
+";
+        let parsed = parse_handbrake_help_encoders(sample_help);
+        assert!(parsed.contains("x265_10bit"));
+        assert!(parsed.contains("nvenc_h265"));
+        assert!(parsed.contains("vaapi_h265"));
+        assert!(!parsed.contains("vt_h265"));
+        assert!(!parsed.contains("qsv_h265"));
+
+        // Linux machine with AMD/Intel DRI render node (VAAPI HEVC ok), no NVIDIA GPU
+        let caps = evaluate_encoder_capabilities(
+            true,
+            Some("1.11.2".to_string()),
+            &parsed,
+            "linux",
+            HostGpuSnapshot {
+                nvidia_present: false,
+                dri_render_present: true,
+                intel_gpu_present: false,
+                vaapi_hevc_verified: Some(true),
+            },
+        );
+        let find_enc = |e: VideoEncoder| {
+            caps.encoders
+                .iter()
+                .find(|info| info.encoder == e)
+                .expect("encoder entry")
+        };
+        assert!(find_enc(VideoEncoder::X26510Bit).supported);
+        assert!(find_enc(VideoEncoder::VaapiH265).supported);
+        assert!(!find_enc(VideoEncoder::NvencH265).supported);
+        assert!(!find_enc(VideoEncoder::VtH265).supported);
+        assert_eq!(caps.recommended_gpu_encoder, Some(VideoEncoder::VaapiH265));
     }
 }
