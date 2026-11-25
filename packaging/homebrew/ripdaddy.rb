@@ -1,6 +1,8 @@
 # Homebrew Cask template for a custom tap (e.g., homebrew-ripdaddy).
 # Installing via `brew install --cask ripdaddy` automatically installs upstream
 # HandBrakeCLI and MakeMKV alongside RipDaddy without bundling either binary.
+# Checksums are auto-populated by `.github/workflows/release.yml` when tagging `v*`
+# (or locally via `python3 scripts/update-packaging-manifests.py --from-release`).
 cask "ripdaddy" do
   arch arm: "aarch64", intel: "x64"
 

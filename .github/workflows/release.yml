@@ -85,3 +85,90 @@ jobs:
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}
+
+  update-packaging:
+    name: Compute SHA256 Checksums & Update Packaging Manifests
+    needs: [publish-tauri]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout default branch
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Compute SHA256SUMS and populate Homebrew & WinGet manifests
+        id: checksums
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          VERSION="$(python3 -c 'import json; print(json.load(open("src-tauri/tauri.conf.json"))["version"])')"
+          TAG="v${VERSION}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+          mkdir -p release-assets
+          python3 scripts/update-packaging-manifests.py \
+            --version "${VERSION}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --from-release \
+            --write-sums release-assets/SHA256SUMS.txt
+
+          # Append checksum table to the GitHub Actions job summary
+          {
+            echo "## RipDaddy ${TAG} Installer Checksums"
+            echo ""
+            echo '```text'
+            cat release-assets/SHA256SUMS.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload SHA256SUMS.txt and populated manifests to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.checksums.outputs.tag }}"
+          # Support both draft and published releases via GitHub REST API upload_url
+          UPLOAD_URL="$(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=30" \
+            --jq ".[] | select(.tag_name == \"${TAG}\") | .upload_url" | head -n 1 | sed 's/{?name,label}//')"
+          RELEASE_ID="$(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=30" \
+            --jq ".[] | select(.tag_name == \"${TAG}\") | .id" | head -n 1)"
+
+          upload_asset() {
+            local file_path="$1"
+            local file_name
+            file_name="$(basename "$file_path")"
+            local existing_id
+            existing_id="$(gh api "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}/assets" \
+              --jq ".[] | select(.name == \"${file_name}\") | .id" | head -n 1 || true)"
+            if [[ -n "${existing_id}" ]]; then
+              gh api -X DELETE "repos/${GITHUB_REPOSITORY}/releases/assets/${existing_id}" >/dev/null
+            fi
+            curl -fsSL \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Content-Type: application/octet-stream" \
+              --data-binary "@${file_path}" \
+              "${UPLOAD_URL}?name=${file_name}" >/dev/null
+          }
+
+          upload_asset "release-assets/SHA256SUMS.txt"
+          upload_asset "packaging/homebrew/ripdaddy.rb"
+          upload_asset "packaging/winget/RipDaddy.installer.yaml"
+
+      - name: Commit populated manifests back to main
+        run: |
+          set -euo pipefail
+          if git diff --quiet packaging/homebrew/ripdaddy.rb packaging/winget/RipDaddy.installer.yaml; then
+            echo "Packaging manifests already up to date."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add packaging/homebrew/ripdaddy.rb packaging/winget/RipDaddy.installer.yaml
+          git commit -m "chore(packaging): populate ${{ steps.checksums.outputs.tag }} installer SHA256 checksums [skip ci]"
+          git push origin main || echo "::warning::Could not push directly to main (branch protection?); populated manifests were uploaded to the GitHub Release."
