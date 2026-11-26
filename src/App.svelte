@@ -100,7 +100,7 @@
   let updateBannerDismissed = $state(false);
   let updateState = $state<AppUpdateState>({
     status: "idle",
-    currentVersion: "0.1.2",
+    currentVersion: "0.1.3",
     availableVersion: null,
     notes: null,
     progressPercent: 0,
