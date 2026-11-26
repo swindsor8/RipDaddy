@@ -237,8 +237,8 @@ pub async fn check_single_binary(
         .map(str::trim)
         .filter(|value| !value.is_empty());
 
-    let (display_path, resolved_cmd, source) = match locate_binary_command(kind, trimmed_custom) {
-        Ok(found) => found,
+    let candidates = match locate_binary_candidates(kind, trimmed_custom) {
+        Ok(list) => list,
         Err(err) => {
             return BinaryStatus {
                 name,
@@ -257,49 +257,72 @@ pub async fn check_single_binary(
         }
     };
 
-    match probe_version(kind, &resolved_cmd).await {
-        Ok(version) => BinaryStatus {
-            name,
-            found: true,
-            path: Some(display_path),
-            version: Some(version),
-            source,
-            error: None,
-            command: Some(resolved_cmd),
-            install_hint,
-        },
-        Err(err) => {
-            // If running inside a Linux toolbox/distrobox container and a host binary
-            // failed to load host shared libraries (e.g., newer host FFmpeg), retry
-            // transparently via `flatpak-spawn --host`.
-            #[cfg(target_os = "linux")]
-            if source != BinarySource::Flatpak {
-                if let Some(host_cmd) = wrap_for_container_host(&resolved_cmd) {
-                    if let Ok(version) = probe_version(kind, &host_cmd).await {
-                        return BinaryStatus {
-                            name,
-                            found: true,
-                            path: Some(display_path),
-                            version: Some(version),
-                            source,
-                            error: None,
-                            command: Some(host_cmd),
-                            install_hint,
-                        };
+    let mut first_failure: Option<(String, ResolvedCommand, BinarySource, String)> = None;
+
+    for (display_path, resolved_cmd, source) in candidates {
+        match probe_version(kind, &resolved_cmd).await {
+            Ok(version) => {
+                return BinaryStatus {
+                    name,
+                    found: true,
+                    path: Some(display_path),
+                    version: Some(version),
+                    source,
+                    error: None,
+                    command: Some(resolved_cmd),
+                    install_hint,
+                };
+            }
+            Err(err) => {
+                // If running inside a Linux toolbox/distrobox container and a host binary
+                // failed to load host shared libraries (e.g., newer host FFmpeg), retry
+                // transparently via `flatpak-spawn --host`.
+                #[cfg(target_os = "linux")]
+                if source != BinarySource::Flatpak {
+                    if let Some(host_cmd) = wrap_for_container_host(&resolved_cmd) {
+                        if let Ok(version) = probe_version(kind, &host_cmd).await {
+                            return BinaryStatus {
+                                name,
+                                found: true,
+                                path: Some(display_path),
+                                version: Some(version),
+                                source,
+                                error: None,
+                                command: Some(host_cmd),
+                                install_hint,
+                            };
+                        }
                     }
                 }
-            }
 
-            BinaryStatus {
-                name,
-                found: false,
-                path: Some(display_path),
-                version: None,
-                source,
-                error: Some(err),
-                command: Some(resolved_cmd),
-                install_hint,
+                if first_failure.is_none() {
+                    first_failure = Some((display_path, resolved_cmd, source, err));
+                }
             }
+        }
+    }
+
+    if let Some((display_path, resolved_cmd, source, err)) = first_failure {
+        BinaryStatus {
+            name,
+            found: false,
+            path: Some(display_path),
+            version: None,
+            source,
+            error: Some(err),
+            command: Some(resolved_cmd),
+            install_hint,
+        }
+    } else {
+        BinaryStatus {
+            name,
+            found: false,
+            path: None,
+            version: None,
+            source: BinarySource::NotFound,
+            error: Some(format!("{} was not found.", kind.display_name())),
+            command: None,
+            install_hint,
         }
     }
 }
@@ -562,6 +585,11 @@ pub fn build_install_hint(
 /// Invokes the host OS's native non-interactive package manager (`winget` on Windows,
 /// `brew` on macOS/Linux, or `flatpak` on Linux) to install a missing CLI.
 pub async fn install_binary_via_package_manager(kind: BinaryKind) -> Result<String, String> {
+    #[cfg(target_os = "linux")]
+    if in_luma_capsule() {
+        return Err(LUMA_CAPSULE_GUIDANCE.to_string());
+    }
+
     let resolved = resolve_package_manager_install_invocation(kind)?;
 
     let mut cmd = Command::new(&resolved.program);
@@ -736,23 +764,31 @@ fn resolve_package_manager_install_invocation(
     }
 }
 
-/// Resolves either a native executable path or (on Linux) an installed Flatpak command.
-fn locate_binary_command(
+#[cfg(target_os = "linux")]
+const LUMA_CAPSULE_GUIDANCE: &str = "RipDaddy is running inside a Luma OS capsule sandbox, which hides host CLIs (~/.local/bin, /var/lib/flatpak), optical drives (/dev/sr0), and /run/systemd/resolve DNS. Run the RipDaddy .AppImage directly on your host (chmod +x RipDaddy_*.AppImage && ./RipDaddy_*.AppImage) instead of importing it into Luma's capsule.";
+
+#[cfg(target_os = "linux")]
+fn in_luma_capsule() -> bool {
+    env::var_os("LUMA_CAPSULE_DESKTOP_ID")
+        .is_some_and(|v| !v.is_empty())
+}
+
+/// Collects all candidate native executables (across `PATH` and standard install dirs)
+/// plus any installed Linux Flatpak fallback, ordered by priority and deduplicated.
+fn locate_binary_candidates(
     kind: BinaryKind,
     custom_path: Option<&str>,
-) -> Result<(String, ResolvedCommand, BinarySource), String> {
-    if let Ok((path, source)) = locate_binary(kind, custom_path) {
-        let path_str = path.to_string_lossy().into_owned();
-        let cmd = ResolvedCommand {
-            program: path_str.clone(),
-            prefix_args: Vec::new(),
-        };
-        return Ok((path_str, cmd, source));
-    }
-
-    // If user explicitly supplied a custom path and it failed validation, don't mask it
-    // with a Flatpak fallback.
+) -> Result<Vec<(String, ResolvedCommand, BinarySource)>, String> {
     if let Some(raw) = custom_path {
+        let candidate = PathBuf::from(raw);
+        if is_executable_file(&candidate) {
+            let path_str = candidate.to_string_lossy().into_owned();
+            let cmd = ResolvedCommand {
+                program: path_str.clone(),
+                prefix_args: Vec::new(),
+            };
+            return Ok(vec![(path_str, cmd, BinarySource::CustomPath)]);
+        }
         return Err(format!(
             "Configured {} path does not exist or is not executable: {}",
             kind.display_name(),
@@ -760,9 +796,49 @@ fn locate_binary_command(
         ));
     }
 
+    let mut results: Vec<(String, ResolvedCommand, BinarySource)> = Vec::new();
+    let mut seen_paths: Vec<PathBuf> = Vec::new();
+
+    let mut push_native = |path: PathBuf, source: BinarySource| {
+        let dedup_key = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+        if seen_paths.contains(&dedup_key) {
+            return;
+        }
+        seen_paths.push(dedup_key);
+        let path_str = path.to_string_lossy().into_owned();
+        let cmd = ResolvedCommand {
+            program: path_str.clone(),
+            prefix_args: Vec::new(),
+        };
+        results.push((path_str, cmd, source));
+    };
+
+    for found in find_all_on_path(kind.executable_names()) {
+        push_native(found, BinarySource::SystemPath);
+    }
+
+    for candidate in standard_install_candidates(kind) {
+        if is_executable_file(&candidate) {
+            push_native(candidate, BinarySource::StandardInstallDir);
+        }
+    }
+
     #[cfg(target_os = "linux")]
     if let Some((display_label, cmd)) = locate_flatpak_binary(kind) {
-        return Ok((display_label, cmd, BinarySource::Flatpak));
+        results.push((display_label, cmd, BinarySource::Flatpak));
+    }
+
+    if !results.is_empty() {
+        return Ok(results);
+    }
+
+    #[cfg(target_os = "linux")]
+    if in_luma_capsule() {
+        return Err(format!(
+            "{} could not be seen from inside the Luma capsule. {}",
+            kind.display_name(),
+            LUMA_CAPSULE_GUIDANCE
+        ));
     }
 
     Err(format!(
@@ -1052,22 +1128,22 @@ pub fn standard_install_candidates(kind: BinaryKind) -> Vec<PathBuf> {
         let home = home_dir();
         match kind {
             BinaryKind::MakeMkv => {
+                if let Some(home_dir) = home {
+                    candidates.push(home_dir.join(".local/bin/makemkvcon"));
+                }
                 candidates.push(PathBuf::from("/usr/bin/makemkvcon"));
                 candidates.push(PathBuf::from("/usr/local/bin/makemkvcon"));
                 candidates.push(PathBuf::from("/opt/makemkv/bin/makemkvcon"));
                 candidates.push(PathBuf::from("/snap/bin/makemkv.makemkvcon"));
                 candidates.push(PathBuf::from("/home/linuxbrew/.linuxbrew/bin/makemkvcon"));
-                if let Some(home_dir) = home {
-                    candidates.push(home_dir.join(".local/bin/makemkvcon"));
-                }
             }
             BinaryKind::HandBrake => {
-                candidates.push(PathBuf::from("/usr/bin/HandBrakeCLI"));
-                candidates.push(PathBuf::from("/usr/local/bin/HandBrakeCLI"));
-                candidates.push(PathBuf::from("/home/linuxbrew/.linuxbrew/bin/HandBrakeCLI"));
                 if let Some(home_dir) = home {
                     candidates.push(home_dir.join(".local/bin/HandBrakeCLI"));
                 }
+                candidates.push(PathBuf::from("/usr/bin/HandBrakeCLI"));
+                candidates.push(PathBuf::from("/usr/local/bin/HandBrakeCLI"));
+                candidates.push(PathBuf::from("/home/linuxbrew/.linuxbrew/bin/HandBrakeCLI"));
             }
         }
     }
@@ -1092,16 +1168,23 @@ fn home_dir() -> Option<PathBuf> {
 }
 
 fn find_on_path(names: &[&str]) -> Option<PathBuf> {
-    let path_var = env::var_os("PATH")?;
+    find_all_on_path(names).into_iter().next()
+}
+
+fn find_all_on_path(names: &[&str]) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let Some(path_var) = env::var_os("PATH") else {
+        return found;
+    };
     for dir in env::split_paths(&path_var) {
         for exe_name in names {
             let candidate = dir.join(exe_name);
-            if is_executable_file(&candidate) {
-                return Some(candidate);
+            if is_executable_file(&candidate) && !found.contains(&candidate) {
+                found.push(candidate);
             }
         }
     }
-    None
+    found
 }
 
 #[cfg(not(target_os = "windows"))]
