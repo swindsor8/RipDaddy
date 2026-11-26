@@ -6,9 +6,9 @@
 cask "ripdaddy" do
   arch arm: "aarch64", intel: "x64"
 
-  version "0.1.2"
-  sha256 arm:   "11da778587259d2b1d48bb64bcbb872fec9c4cb1f74973f77c0e05e9fcb119af",
-         intel: "c4334fbbe0cfe3cb7b6b2d0a0b97caf9d0e040b83ddce63659dfc992df6ed7e3"
+  version "0.1.3"
+  sha256 arm:   "cd6c5a9ffaf1574be0f24dc26ccbaa5733886fcd2f04e9e3ac7e287c76a992be",
+         intel: "23750fce038cdc1ecbcbcd1146a1f996cf4ecced746a024b783072f19ff3951a"
 
   url "https://github.com/swindsor8/RipDaddy/releases/download/v#{version}/RipDaddy_#{version}_#{arch}.dmg"
   name "RipDaddy"
